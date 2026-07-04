@@ -1,0 +1,13 @@
+Claude Mission Control
+Copyright (c) 2026 Patrick Røbel. MIT licensed (see LICENSE).
+
+This product bundles third-party assets:
+
+- Humaaans character illustrations by Pablo Stanley (https://www.humaaans.com),
+  licensed under Creative Commons Attribution (CC-BY). The inline-SVG poses in
+  public/humaaans.js were generated from these illustrations.
+- react-humaaans by jzarca01 (https://github.com/jzarca01/react-humaaans),
+  MIT licensed, used as the source form of the Humaaans poses during asset
+  generation.
+
+Attribution: "Characters: Humaaans by Pablo Stanley."

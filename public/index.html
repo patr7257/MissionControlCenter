@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Fleet Monitor</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1><span class="dot">&#9679;</span> Agent Fleet Monitor</h1>
+    <div class="conn" id="conn"><span class="led"></span><span id="connText">connecting</span></div>
+    <div class="nav" id="nav">
+      <button data-view="sessions" class="navbtn on" id="navSessions">Sessions</button>
+      <div class="toggle" id="toggle">
+        <button data-view="cards" class="on">Pro</button>
+        <button data-view="office">Office</button>
+      </div>
+    </div>
+    <div class="crumb" id="crumb" style="display:none">
+      <button id="crumbBack">&#8592; Sessions</button>
+      <span class="crumb-session" id="crumbSession"></span>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="n" id="sActive">0</div><div class="l">working</div></div>
+      <div class="stat"><div class="n" id="sDone">0</div><div class="l">done</div></div>
+      <div class="stat"><div class="n" id="sSteps">0</div><div class="l">steps</div></div>
+      <div class="stat"><div class="n" id="sClock">0:00</div><div class="l">elapsed</div></div>
+    </div>
+  </header>
+
+  <div id="viewSessions" class="view active">
+    <div class="new-session-bar" id="newSessionBar">
+      <select id="newSessionRepo" class="ns-select"><option value="">Loading repos...</option></select>
+      <button id="newSessionBtn" class="ns-btn" type="button">New session</button>
+      <span class="ns-feedback" id="newSessionFeedback"></span>
+    </div>
+    <div class="sessions-wrap" id="sessionsWrap"></div>
+    <div class="empty sessions-empty" id="sessionsEmpty">No sessions tracked yet. Start a Claude Code session and it will appear here.</div>
+  </div>
+
+  <div id="viewCards" class="view">
+    <main>
+      <section class="lane working"><div class="lane-head"><span class="pip">&#9679;</span> Working <span class="count" id="cWorking">0</span></div><div class="lane-body" id="laneWorking"><div class="empty">No active agents</div></div></section>
+      <section class="lane done"><div class="lane-head"><span class="pip">&#9679;</span> Done <span class="count" id="cDone">0</span></div><div class="lane-body" id="laneDone"><div class="empty">Nothing finished yet</div></div></section>
+      <section class="lane error"><div class="lane-head"><span class="pip">&#9679;</span> Errors <span class="count" id="cError">0</span></div><div class="lane-body" id="laneError"><div class="empty">No errors</div></div></section>
+    </main>
+    <footer id="foot">Waiting for agents. Dispatch parallel subagents and they will appear here.</footer>
+  </div>
+
+  <div id="viewOffice" class="view"></div>
+
+  <script src="/store.js"></script>
+  <script src="/view-sessions.js"></script>
+  <script src="/view-cards.js"></script>
+  <script src="/humaaans.js"></script>
+  <script src="/view-office.js"></script>
+  <script>
+    (function () {
+      Store.registerView(ViewSessions);
+      Store.registerView(ViewCards);
+      Store.registerView(ViewOffice);
+
+      var saved = null; try { saved = localStorage.getItem('fleetView'); } catch (e) {}
+      var detailStart = (saved === 'office') ? 'office' : 'cards';
+
+      function updateCrumb() {
+        var crumb = document.getElementById('crumb');
+        var nav = document.getElementById('nav');
+        var active = Store.getActiveId();
+        var inDetail = (active === 'cards' || active === 'office') && Store.selectedSessionId;
+        crumb.style.display = inDetail ? '' : 'none';
+        nav.style.display = inDetail ? 'none' : '';
+        if (inDetail) {
+          var s = Store.sessions.get(Store.selectedSessionId);
+          var label = s ? ((s.project || '(unknown project)') + (s.branch ? ' · ' + s.branch : '')) : '';
+          document.getElementById('crumbSession').textContent = label;
+        }
+      }
+
+      document.querySelectorAll('#toggle button').forEach(function (b) {
+        b.addEventListener('click', function () {
+          var id = b.getAttribute('data-view');
+          Store.setActive(id);
+          detailStart = id;
+          document.querySelectorAll('#toggle button').forEach(function (x) { x.classList.toggle('on', x === b); });
+          updateCrumb();
+        });
+      });
+      document.getElementById('navSessions').addEventListener('click', function () { Store.clearSession(); });
+      document.getElementById('crumbBack').addEventListener('click', function () { Store.clearSession(); });
+
+      document.querySelectorAll('#toggle button').forEach(function (x) { x.classList.toggle('on', x.getAttribute('data-view') === detailStart); });
+      Store.setActive('sessions');
+      updateCrumb();
+      Store.connect();
+
+      // Store.selectSession() (called by view-sessions.js on card click) always
+      // opens the Pro detail per the store contract; refresh the crumb + toggle after it runs.
+      var origSelect = Store.selectSession;
+      Store.selectSession = function (id) {
+        origSelect(id);
+        detailStart = 'cards';
+        document.querySelectorAll('#toggle button').forEach(function (x) { x.classList.toggle('on', x.getAttribute('data-view') === 'cards'); });
+        updateCrumb();
+      };
+      var origClear = Store.clearSession;
+      Store.clearSession = function () { origClear(); updateCrumb(); };
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+# Dependencies (this project is intentionally zero-dependency; none expected)
+node_modules/
+
+# Runtime data lives under ~/.claude/agent-fleet-monitor/, never in the repo.
+# Guard against stray copies if a script ever writes here:
+log.jsonl
+*.log
+server.lock
+settings.json.fleet-monitor.bak
+
+# Scratch / generated samples
+scratchpad/
+*.tmp
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

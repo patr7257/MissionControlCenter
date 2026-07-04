@@ -1,0 +1,16 @@
+{
+  "name": "claude-mission-control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local, zero-dependency command center for Claude Code: live views of a session's subagents, growing into a machine-wide multi-session manager.",
+  "author": "Patrick Røbel",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node start.mjs",
+    "stop": "node stop.mjs"
+  }
+}
