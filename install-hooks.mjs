@@ -16,7 +16,9 @@ const SHIM = path.join(SKILL_DIR, 'send-event.mjs').split(path.sep).join('/');
 // Match on the bare shim filename so uninstall finds our hooks regardless of which
 // absolute path install recorded (skill-junction path vs the real repo path).
 export const SHIM_MARK = 'send-event.mjs';
-const COMMAND = `node "${SHIM}"`;
+// The packaged desktop app overrides the command so hooks point at its shipped
+// shim wrapper (send-event.mjs.cmd) instead of "node <repo path>".
+const COMMAND = process.env.CMC_HOOK_COMMAND || `node "${SHIM}"`;
 
 // Events we feed, and whether the event supports a tool/agent matcher.
 const MATCHED = ['SubagentStart', 'SubagentStop', 'PreToolUse', 'PostToolUse'];

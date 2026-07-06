@@ -124,6 +124,21 @@ Still pending (not code-complete):
   a wildcard `-like` and could in theory match an unrelated Windows Terminal window with a
   coincidentally similar tab title.
 
+## Desktop app (Electron), the sanctioned exception to zero-dependency
+`desktop/` wraps the unchanged backend in an Electron window and packages it as a Windows MSI.
+The zero-runtime-dependency rule still applies to the server and `public/` UI; `desktop/` is the
+one place where npm devDependencies (electron, electron-builder) are allowed. Key facts:
+- `desktop/main.mjs` spawns `../server.mjs` detached with `ELECTRON_RUN_AS_NODE=1` (lock file,
+  `stop.mjs`, and the shim keep working unchanged) and loads `http://127.0.0.1:4317`.
+- Packaged installs register hooks via `resources\backend\send-event.mjs.cmd` (Electron-as-Node
+  wrapper, no system Node needed); `install-hooks.mjs` honours the `CMC_HOOK_COMMAND` env
+  override for this. The filename contains `send-event.mjs` on purpose so `SHIM_MARK` matching
+  still works.
+- MSI via electron-builder; the `upgradeCode` GUID in `desktop/electron-builder.yml` must NEVER
+  change (it is what makes a newer MSI upgrade in place).
+- Releases: publish a GitHub release tagged `fleet-vX.Y.Z` and
+  `.github/workflows/fleet-desktop-msi.yml` builds and attaches the MSI. See `desktop/README.md`.
+
 ## Docs
 - `docs/plans/` - implementation plans.
 - `docs/specs/` - design specs.
