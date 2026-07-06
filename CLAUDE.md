@@ -66,11 +66,37 @@ and `docs/specs/session-discovery-findings.md`.
 Clicking anywhere on a session card in the Sessions board calls `POST /focus` and jumps to that
 session's terminal; a small "Details" button (top right, shown on hover) drills into the
 Pro/Office subagent view instead (`Store.selectSession`). `terminal.focusSession()` in
-`terminal.mjs` has three outcomes: `mode:'focused'` (a tab we launched is bound to this session,
-`wt -w cmc focus-tab -t <index>`), `mode:'reattached'` (no bound tab but a known cwd, opens a new
-tab with `claude --resume <id>`), or `ok:false, mode:'unmanaged'` (no bound tab and no known cwd,
-nothing to jump to). The frontend shows a toast ("Terminal not managed by mission control.") for
-the unmanaged case and never throws a visible error either way.
+`terminal.mjs` NEVER spawns a tab: it only has two outcomes, `mode:'focused'` (a tab bound to this
+session, `wt -w cmc focus-tab -t <index>`, either bound earlier by a hook or lazily adopted on
+this very call) or `ok:false, mode:'unmanaged'` (nothing to jump to). Lazy adopt: if no tab is
+bound to the session but exactly one unbound tab (`sessionId === null`) matches the session's cwd
+(via the realpath-aware `normalizePath`), that tab is adopted and focused; with zero or 2+
+candidates it falls through to unmanaged rather than guess. The frontend shows a toast ("Terminal
+not managed by mission control.") for the unmanaged case and never throws a visible error either
+way; it also adds an `unmanaged` class to the card, which reveals a confirm-gated "Reopen" button
+in place of "Details".
+
+Opening a brand new tab and resuming into it (`claude --resume <id>`) only happens through the
+explicit `reopenSession()` export plus `POST /reopen`, wired to that Reopen button. The button
+first asks `window.confirm(...)`, so a duplicate tab now requires a deliberate, confirmed action
+instead of being a side effect of an ordinary card click. `reopenSession()` nulls the `sessionId`
+on any prior `managedTabs` entries bound to that session first (never removes them, since
+`tabIndex` is each entry's position in the array) so a later focus resolves to the fresh tab.
+
+Binding (`bindSession()`, called from the `SessionStart` hook and retried on every
+`UserPromptSubmit`) matches an unbound tab by cwd within `BIND_WINDOW_MS` (180s, generous enough
+for a cold `wt` plus `claude` startup) of when it was launched; the `UserPromptSubmit` retry exists
+because a single missed `SessionStart` bind used to make every later click on that card a
+duplicate-tab click forever. `clearStaleManagedTabsIfWindowGone()` (via `isWtRunning()`, a
+`tasklist` check for any `WindowsTerminal.exe` process) wipes `managedTabs` whenever zero WT
+processes exist, so a closed-and-reopened cmc window starts clean instead of pointing at stale tab
+indices; it fails open (assumes WT is running) on any error, and is a no-op that always sees
+"running" under `CMC_DRY_RUN` so test runs never touch persisted state.
+
+Known-minor limitation: `isWtRunning()` only proves the cmc window is gone when ZERO
+`WindowsTerminal.exe` processes exist anywhere on the machine. With other WT windows open, a stale
+`focus-tab` could still target a gone cmc window in that narrow case; a per-window-title check
+would cost 300ms+ per click, so this is accepted rather than engineered around.
 
 Because `wt` reuses a single process per named window, a background process (this Node server)
 asking it to switch tabs is not always allowed by Windows to steal focus. `bringToForeground()` in

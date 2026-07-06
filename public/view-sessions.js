@@ -49,6 +49,7 @@
     el.title = 'Click to bring this session\'s terminal window to the front';
     el.innerHTML =
       '<button type="button" class="sc-details">Details</button>' +
+      '<button type="button" class="sc-reopen">Reopen</button>' +
       '<div class="sc-top">' +
         '<span class="sc-dot"></span>' +
         '<div class="sc-heading"><span class="sc-project"></span><span class="sc-branch"></span></div>' +
@@ -73,6 +74,7 @@
       model: el.querySelector('.sc-model'),
       badge: el.querySelector('.sc-badge'),
       details: el.querySelector('.sc-details'),
+      reopen: el.querySelector('.sc-reopen'),
       _status: null, _project: null, _branch: null, _prompt: null, _model: null, _badge: null,
       _id: s.id
     };
@@ -81,14 +83,19 @@
       ev.stopPropagation();
       Store.selectSession(c._id);
     });
+    c.reopen.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      reopenCard(c);
+    });
     return c;
   }
 
   // One click on a card = bring the terminal window running that session to the
-  // front. For a session the app spawned/bound, this focuses the exact managed
-  // tab; for one it only knows the cwd for, it reattaches via `claude --resume`
-  // in a new tab; for one it knows nothing about, it is a graceful no-op with a
-  // toast, never a thrown error.
+  // front. Two outcomes: `mode:'focused'` (a managed tab exists, directly bound
+  // or lazily adopted by cwd, and is now on top) or `ok:false, mode:'unmanaged'`
+  // (no tab to jump to, never a thrown error). focusSession() never spawns a
+  // tab; the only way to open a new one is the explicit, confirm-gated Reopen
+  // button (see reopenCard), which appears once a card is marked unmanaged.
   function focusCard(c) {
     c.el.classList.add('focusing');
     fetch('/focus', {
@@ -98,13 +105,38 @@
     }).then(function (res) { return res.json(); }).then(function (data) {
       c.el.classList.remove('focusing');
       if (data && data.mode === 'unmanaged') {
+        c.el.classList.add('unmanaged');
         showToast('Terminal not managed by mission control.');
       } else if (!data || data.ok === false) {
         showToast('Could not focus that terminal.');
+      } else {
+        c.el.classList.remove('unmanaged');
       }
     }).catch(function () {
       c.el.classList.remove('focusing');
       showToast('Could not reach the server to focus that terminal.');
+    });
+  }
+
+  // Explicit reattach, gated behind a confirm dialog: opens a brand new
+  // terminal tab and resumes into it with `claude --resume`. Only reachable
+  // from the Reopen button, which itself only shows up once a focus attempt
+  // has come back unmanaged, so this never fires as a side effect of a
+  // plain card click.
+  function reopenCard(c) {
+    if (!window.confirm('Open a new terminal tab for this session? Use this only if the old terminal window is gone.')) return;
+    fetch('/reopen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: c._id })
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (!data || data.ok === false) {
+        showToast('Could not reopen that terminal.');
+      } else {
+        c.el.classList.remove('unmanaged');
+      }
+    }).catch(function () {
+      showToast('Could not reach the server to reopen that terminal.');
     });
   }
 

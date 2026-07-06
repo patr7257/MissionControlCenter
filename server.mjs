@@ -364,6 +364,14 @@ function handleEvent(payload) {
       session.lastActivityAt = nowMs();
       const promptText = payload.prompt || payload.message;
       if (promptText) session.lastPrompt = truncateLastPrompt(cleanTask(promptText, session.lastPrompt));
+      // Bind retry: the SessionStart bind may have missed (server restarted
+      // between launch and hook, tab not yet up, etc). This is idempotent and
+      // only ever matches an unbound tab, so it is safe to call on every prompt.
+      try {
+        terminal.bindSession(session.cwd, sessionId);
+      } catch {
+        // best effort only, never let binding affect session tracking
+      }
       pushSession(session);
       return;
     }
@@ -760,6 +768,29 @@ const server = http.createServer((req, res) => {
         const session = sessions.get(sessionId);
         const cwd = session ? session.cwd : null;
         result = terminal.focusSession(sessionId, cwd);
+      } catch (error) {
+        result = { ok: false, error: String(error) };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(result));
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && url === '/reopen') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 5_000_000) req.destroy(); // guard against runaway payloads
+    });
+    req.on('end', () => {
+      let result;
+      try {
+        const payload = JSON.parse(body || '{}');
+        const sessionId = payload.sessionId;
+        const session = sessions.get(sessionId);
+        const cwd = session ? session.cwd : null;
+        result = terminal.reopenSession(sessionId, cwd);
       } catch (error) {
         result = { ok: false, error: String(error) };
       }

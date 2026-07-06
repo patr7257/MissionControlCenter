@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 export const WT_WINDOW = 'cmc';
 
@@ -51,11 +51,24 @@ function saveManagedTabs() {
 // unbounded growth is acceptable for a session-scoped tool.
 export const managedTabs = loadManagedTabs();
 
-const BIND_WINDOW_MS = 60000;
+// Gates only the eager bind-on-hook path (bindSession, the SessionStart/
+// UserPromptSubmit fast path): a cold `wt` window plus `claude` startup can
+// take longer than a minute, so this stays generous. focusSession's lazy
+// adopt (see below) has no time window at all: it is uniqueness-gated instead.
+const BIND_WINDOW_MS = 180000;
 
+// Resolves through fs.realpathSync first so a junction/symlink cwd compares
+// equal to the real path Windows Terminal reports, falling back to plain
+// string normalization if realpath fails (path does not exist yet, etc).
 function normalizePath(p) {
   if (!p) return '';
-  return String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  let resolved = String(p);
+  try {
+    resolved = fs.realpathSync(resolved);
+  } catch {
+    // path may not exist (yet) or be unreadable: fall back to the raw string
+  }
+  return resolved.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 }
 
 // Build the readable command string shown in the UI/logs. `quotedIndexes` is
@@ -74,6 +87,40 @@ function buildReadableCommand(args, quotedIndexes) {
 // Fire-and-forget launch of wt.exe via cmd start, detached so Node never blocks.
 function spawnWt(args) {
   spawn('cmd', ['/c', 'start', '', 'wt', ...args], { detached: true, stdio: 'ignore' }).unref();
+}
+
+// Synchronous check: is any WindowsTerminal.exe process running at all? Fails
+// open (returns true) on any error or timeout, since the point is only to
+// detect the confident-negative case below, never to block a real focus/bind.
+// Always true under CMC_DRY_RUN so test runs never wipe managedTabs.
+function isWtRunning() {
+  if (process.env.CMC_DRY_RUN) return true;
+  try {
+    const result = spawnSync('tasklist', ['/FI', 'IMAGENAME eq WindowsTerminal.exe', '/NH'], {
+      encoding: 'utf8',
+      timeout: 2000,
+    });
+    if (result.error || result.status !== 0) return true;
+    const out = (result.stdout || '').toLowerCase();
+    return out.includes('windowsterminal.exe');
+  } catch {
+    return true;
+  }
+}
+
+// If zero WindowsTerminal processes exist, every entry in managedTabs points
+// at a tabIndex in a window that is no longer there, so all of them are
+// stale. Clears in place (never reassigns the exported array reference) and
+// persists. Best effort, never throws.
+function clearStaleManagedTabsIfWindowGone() {
+  try {
+    if (isWtRunning()) return;
+    if (managedTabs.length === 0) return;
+    managedTabs.length = 0;
+    saveManagedTabs();
+  } catch {
+    // best effort only
+  }
 }
 
 function psQuote(value) {
@@ -130,6 +177,7 @@ export function listRepos() {
 
 export function launchSession(repoPath, title) {
   try {
+    clearStaleManagedTabsIfWindowGone();
     const args = ['-w', WT_WINDOW, 'nt', '-d', repoPath, '--title', title, 'claude'];
     // Quote the repoPath (index 4) and title (index 6): the values that may
     // contain spaces. Everything else stays bare for readability.
@@ -150,15 +198,37 @@ export function launchSession(repoPath, title) {
   }
 }
 
-// Focus the terminal window/tab hosting `sessionId`. Three outcomes:
-// - 'focused': a tab we launched into the managed window is bound to this session.
-// - 'reattached': not bound (external session, or bound tab now gone), but we know
-//   its cwd, so we open a new tab in the managed window and resume into it there.
-// - ok:false, mode:'unmanaged': no bound tab and no known cwd, so there is nothing to
-//   jump to. This is the graceful "not spawned by the app" case, never an exception.
+// Focus the terminal window/tab hosting `sessionId`. Never spawns a tab: it
+// only jumps to a tab that already exists. Two outcomes:
+// - 'focused': a tab bound to this session (directly, or lazily adopted below).
+// - ok:false, mode:'unmanaged': nothing to jump to, either because there is no
+//   matching tab or because adopting one would require guessing. This is the
+//   graceful "not spawned by, or not resolvable to, this app" case, never an
+//   exception. The UI surfaces it as a toast plus an explicit Reopen button
+//   (see reopenSession below), rather than silently opening a new tab.
 export function focusSession(sessionId, cwd) {
   try {
-    const existing = managedTabs.find((t) => t.sessionId === sessionId);
+    clearStaleManagedTabsIfWindowGone();
+
+    let existing = managedTabs.find((t) => t.sessionId === sessionId);
+
+    if (!existing && cwd) {
+      // Lazy adopt: a tab we launched but never got a SessionStart/
+      // UserPromptSubmit bind for (missed bind window, race, server restart
+      // between launch and hook). Only adopt when exactly one unbound tab
+      // matches this cwd; with 2+ candidates we cannot tell them apart, so we
+      // never guess and fall through to unmanaged instead.
+      const normalizedCwd = normalizePath(cwd);
+      const candidates = managedTabs.filter(
+        (t) => t.sessionId === null && normalizePath(t.cwd) === normalizedCwd
+      );
+      if (candidates.length === 1) {
+        candidates[0].sessionId = sessionId;
+        saveManagedTabs();
+        existing = candidates[0];
+      }
+    }
+
     if (existing) {
       const args = ['-w', WT_WINDOW, 'focus-tab', '-t', String(existing.tabIndex)];
       const command = buildReadableCommand(args, new Set());
@@ -170,12 +240,34 @@ export function focusSession(sessionId, cwd) {
       return { ok: true, mode: 'focused', command };
     }
 
+    return { ok: false, mode: 'unmanaged', error: 'No known terminal tab for this session' };
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
+}
+
+// Explicit, user-confirmed reattach: opens a NEW tab in the managed window and
+// resumes into it via `claude --resume`. This is the old auto-reattach branch
+// of focusSession, moved here verbatim so it only ever runs behind a deliberate
+// action (the UI's confirm-gated Reopen button), never as a side effect of a
+// plain card click.
+export function reopenSession(sessionId, cwd) {
+  try {
     if (!cwd) {
       return { ok: false, mode: 'unmanaged', error: 'No known working directory for this session' };
     }
 
-    // External or not yet bound: reattach via --resume in a new tab. --title lets
-    // bringToForeground() find the right window afterwards by its active tab title.
+    // Any prior entries bound to this session now point at a tab we are about
+    // to replace: null them out so a future focus resolves to the fresh tab
+    // instead of the stale one. Entries are never removed, since tabIndex is
+    // each entry's position in managedTabs and removing one would desync every
+    // later index from its real tab.
+    for (const tab of managedTabs) {
+      if (tab.sessionId === sessionId) tab.sessionId = null;
+    }
+
+    // --title lets bringToForeground() find the right window afterwards by
+    // its active tab title.
     const title = 'resume:' + sessionId;
     const args = ['-w', WT_WINDOW, 'nt', '-d', cwd, '--title', title, 'claude', '--resume', sessionId];
     // Quote the cwd (index 4) and title (index 6): the values that may contain

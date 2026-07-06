@@ -192,6 +192,20 @@
 .session-card:focus-within .sc-details, .sc-details:focus-visible { opacity: 1; }
 .sc-details:hover { border-color: var(--accent); color: var(--accent); }
 
+/* ---- Reopen button on a session card (hidden unless the card is unmanaged,
+   i.e. a focus attempt already came back with nothing to jump to: opens a
+   brand new terminal tab via a confirm dialog, the only path left that can
+   spawn a tab from a card click) ---- */
+.sc-reopen {
+  display: none;
+  position: absolute; top: 10px; right: 12px; z-index: 2;
+  background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); border-radius: 7px;
+  padding: 3px 9px; font: inherit; font-size: 10.5px; font-weight: 650; cursor: pointer;
+}
+.sc-reopen:hover { border-color: var(--accent); color: var(--accent); }
+.session-card.unmanaged .sc-details { display: none; }
+.session-card.unmanaged .sc-reopen { display: block; }
+
 /* ---- Toast (brief, bottom-right feedback for a card click that could not
    focus a terminal, e.g. a session the app does not manage) ---- */
 .toast {
