@@ -62,15 +62,41 @@ focus/resume + `/repos` `/launch` `/focus` endpoints; polish + docs). Verified h
 edits), `install-hooks.mjs`. Design and findings in `docs/plans/2026-07-02-multi-session-manager.md`
 and `docs/specs/session-discovery-findings.md`.
 
+## Click-to-focus (one click on a session card)
+Clicking anywhere on a session card in the Sessions board calls `POST /focus` and jumps to that
+session's terminal; a small "Details" button (top right, shown on hover) drills into the
+Pro/Office subagent view instead (`Store.selectSession`). `terminal.focusSession()` in
+`terminal.mjs` has three outcomes: `mode:'focused'` (a tab we launched is bound to this session,
+`wt -w cmc focus-tab -t <index>`), `mode:'reattached'` (no bound tab but a known cwd, opens a new
+tab with `claude --resume <id>`), or `ok:false, mode:'unmanaged'` (no bound tab and no known cwd,
+nothing to jump to). The frontend shows a toast ("Terminal not managed by mission control.") for
+the unmanaged case and never throws a visible error either way.
+
+Because `wt` reuses a single process per named window, a background process (this Node server)
+asking it to switch tabs is not always allowed by Windows to steal focus. `bringToForeground()` in
+`terminal.mjs` follows every `wt focus-tab`/`wt ... --resume` call with a best-effort PowerShell
+nudge: `Add-Type` the `user32.dll` `ShowWindow`/`SetForegroundWindow` signatures, find the
+`WindowsTerminal` process whose active tab title (every launch/reattach sets `--title`) matches,
+restore it if minimized (`SW_RESTORE`), then force it to the foreground. Best effort only, matched
+by title since there is no per-tab PID to target.
+
+`managedTabs` (the tab-index bookkeeping in `terminal.mjs`) is persisted to
+`~/.claude/agent-fleet-monitor/managed-tabs.json` (skipped under `CMC_DRY_RUN`) so a server
+restart does not desync `tabIndex` from the real tab positions in a still-open managed window.
+
 Still pending (not code-complete):
-- **Live terminal validation on the real machine.** The `wt` launch, exact-tab focus (managed
-  window `cmc`), and `--resume` reattach were only exercised in `CMC_DRY_RUN` mode; opening/
-  focusing real Windows Terminal tabs must be confirmed by hand.
+- **Live terminal validation on the real machine.** The `wt` launch/focus/`--resume` reattach and
+  the `SetForegroundWindow` nudge were only exercised in `CMC_DRY_RUN` mode plus a headless
+  serve-and-check; opening/focusing real Windows Terminal tabs must be confirmed by hand,
+  including whether the foreground nudge actually raises the window versus just flashing the
+  taskbar icon.
 - **Office (Humaaans) visual tuning.** The 2.5D office is a first visual pass; see
   `docs/office-humaaans-status.md` for the layout knobs to adjust.
 - Known-minor backlog from the final review (all non-blocking): `terminal.mjs` `managedTabs` is
   unbounded by design (tabIndex is positional); a subagent-only session reads "working" until its
-  first turn-stop; blank model line if a hook omits `model`.
+  first turn-stop; blank model line if a hook omits `model`; the foreground-nudge title match uses
+  a wildcard `-like` and could in theory match an unrelated Windows Terminal window with a
+  coincidentally similar tab title.
 
 ## Docs
 - `docs/plans/` - implementation plans.

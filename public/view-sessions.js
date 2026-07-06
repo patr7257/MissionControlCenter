@@ -1,6 +1,7 @@
 // Sessions board: machine-wide overview, one card per Claude Code session.
-// Top-level view. Clicking a card drills into the Pro/Office detail filtered
-// to that session (see Store.selectSession).
+// Top-level view. Clicking a card focuses the terminal window/tab running that
+// session (see focusCard below); a small "Details" affordance on the card drills
+// into the Pro/Office subagent view for that session instead (see Store.selectSession).
 (function () {
   var F = Store.fmt;
   var cards = new Map(); // session id -> refs
@@ -45,8 +46,9 @@
     var el = document.createElement('div');
     el.className = 'session-card';
     el.setAttribute('data-id', s.id);
+    el.title = 'Click to bring this session\'s terminal window to the front';
     el.innerHTML =
-      '<button type="button" class="sc-open">Open</button>' +
+      '<button type="button" class="sc-details">Details</button>' +
       '<div class="sc-top">' +
         '<span class="sc-dot"></span>' +
         '<div class="sc-heading"><span class="sc-project"></span><span class="sc-branch"></span></div>' +
@@ -58,7 +60,6 @@
         '<span class="sc-model"></span>' +
         '<span class="sc-badge" style="display:none"></span>' +
       '</div>';
-    el.addEventListener('click', function () { Store.selectSession(s.id); });
     el.classList.add('enter');
     setTimeout(function () { el.classList.remove('enter'); }, 280);
     var c = {
@@ -71,33 +72,54 @@
       time: el.querySelector('.sc-time'),
       model: el.querySelector('.sc-model'),
       badge: el.querySelector('.sc-badge'),
-      open: el.querySelector('.sc-open'),
+      details: el.querySelector('.sc-details'),
       _status: null, _project: null, _branch: null, _prompt: null, _model: null, _badge: null,
       _id: s.id
     };
-    c.open.addEventListener('click', function (ev) {
+    el.addEventListener('click', function () { focusCard(c); });
+    c.details.addEventListener('click', function (ev) {
       ev.stopPropagation();
-      openSession(c);
+      Store.selectSession(c._id);
     });
     return c;
   }
 
-  function openSession(c) {
-    var open = c.open;
-    var prevText = open.textContent;
-    open.disabled = true;
-    open.textContent = '...';
+  // One click on a card = bring the terminal window running that session to the
+  // front. For a session the app spawned/bound, this focuses the exact managed
+  // tab; for one it only knows the cwd for, it reattaches via `claude --resume`
+  // in a new tab; for one it knows nothing about, it is a graceful no-op with a
+  // toast, never a thrown error.
+  function focusCard(c) {
+    c.el.classList.add('focusing');
     fetch('/focus', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: c._id })
     }).then(function (res) { return res.json(); }).then(function (data) {
-      open.textContent = data && data.mode ? data.mode : 'failed';
-      setTimeout(function () { open.disabled = false; open.textContent = prevText; }, 1400);
+      c.el.classList.remove('focusing');
+      if (data && data.mode === 'unmanaged') {
+        showToast('Terminal not managed by mission control.');
+      } else if (!data || data.ok === false) {
+        showToast('Could not focus that terminal.');
+      }
     }).catch(function () {
-      open.textContent = 'failed';
-      setTimeout(function () { open.disabled = false; open.textContent = prevText; }, 1400);
+      c.el.classList.remove('focusing');
+      showToast('Could not reach the server to focus that terminal.');
     });
+  }
+
+  var toastEl = null;
+  var toastTimer = null;
+  function showToast(message) {
+    if (!toastEl) {
+      toastEl = document.createElement('div');
+      toastEl.className = 'toast';
+      document.body.appendChild(toastEl);
+    }
+    toastEl.textContent = message;
+    toastEl.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 2600);
   }
 
   function applyCard(c, s) {
