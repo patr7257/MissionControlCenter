@@ -1,0 +1,36 @@
+# Build config for the Claude Mission Control desktop app (Windows MSI).
+# The MSI upgradeCode below must NEVER change: Windows uses it to recognise the
+# product across versions so a newer MSI upgrades in place instead of installing
+# a second copy.
+appId: dk.zrm.claude-mission-control
+productName: Claude Mission Control
+directories:
+  output: dist
+  buildResources: build
+asar: false
+files:
+  - main.mjs
+  - update-check.mjs
+extraResources:
+  # Ship the existing zero-dependency backend + UI unchanged under resources/backend.
+  # "*.mjs" (not an explicit list) so new backend modules are picked up automatically.
+  - from: ..
+    to: backend
+    filter:
+      - "*.mjs"
+      - package.json
+      - public/**
+  - from: assets/send-event.mjs.cmd
+    to: backend/send-event.mjs.cmd
+win:
+  target:
+    - msi
+  icon: build/icon.ico
+msi:
+  upgradeCode: "e5872abe-e77d-4efc-ae4b-636045d67e78"
+  perMachine: false
+  oneClick: false
+  runAfterFinish: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  shortcutName: Claude Mission Control

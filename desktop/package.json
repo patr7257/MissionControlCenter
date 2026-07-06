@@ -1,0 +1,19 @@
+{
+  "name": "claude-mission-control-desktop",
+  "productName": "Claude Mission Control",
+  "version": "0.1.0",
+  "description": "Desktop shell for the Claude Mission Control agent fleet monitor",
+  "author": "Patrick Røbel",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win msi --publish never"
+  },
+  "devDependencies": {
+    "electron": "^42.0.0",
+    "electron-builder": "^26.0.0"
+  }
+}
