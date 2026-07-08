@@ -23,7 +23,13 @@ See `docs/plans/` and `docs/specs/` for the design and roadmap.
 
 ## Architecture
 - `server.mjs` - zero-dependency Node server: serves `public/**`, a Server-Sent Events stream
-  (`/stream`), and ingests Claude Code hook events (`POST /event`). Keeps an in-memory model.
+  (`/stream`), and ingests Claude Code hook events (`POST /event`). Keeps an in-memory model that
+  is also persisted to `~/.claude/agent-fleet-monitor/sessions.json` (debounced writes, skipped
+  under `CMC_DRY_RUN`) so a restart rehydrates the board instead of starting empty. On load it
+  prunes entries older than 7 days (24h for ended sessions), caps the file at 200 newest, and
+  downgrades any in-flight status (`working`/`awaiting`/`needs-permission`) to `recent` + not-live
+  since a persisted session was not seen live this run; hooks re-upgrade it on the next event.
+  Rehydrate runs before the backfill scan (which skips ids already present) and before hooks fire.
 - Hooks: `install-hooks.mjs` merges a set of hooks into `~/.claude/settings.json` while active;
   `uninstall-hooks.mjs` removes exactly those; `send-event.mjs` is the per-hook shim that POSTs
   to the server and no-ops instantly when the server is down. `start.mjs` / `stop.mjs`
@@ -104,7 +110,10 @@ asking it to switch tabs is not always allowed by Windows to steal focus. `bring
 nudge: `Add-Type` the `user32.dll` `ShowWindow`/`SetForegroundWindow` signatures, find the
 `WindowsTerminal` process whose active tab title (every launch/reattach sets `--title`) matches,
 restore it if minimized (`SW_RESTORE`), then force it to the foreground. Best effort only, matched
-by title since there is no per-tab PID to target.
+by title since there is no per-tab PID to target. The match is exact-first (`MainWindowTitle -eq
+<title>`) and only falls back to the broad `-like '*<title>*'` wildcard when no exact match exists,
+so an unrelated WT window whose tab title merely contains the string is no longer raised in the
+common case.
 
 `managedTabs` (the tab-index bookkeeping in `terminal.mjs`) is persisted to
 `~/.claude/agent-fleet-monitor/managed-tabs.json` (skipped under `CMC_DRY_RUN`) so a server
@@ -120,9 +129,7 @@ Still pending (not code-complete):
   `docs/office-humaaans-status.md` for the layout knobs to adjust.
 - Known-minor backlog from the final review (all non-blocking): `terminal.mjs` `managedTabs` is
   unbounded by design (tabIndex is positional); a subagent-only session reads "working" until its
-  first turn-stop; blank model line if a hook omits `model`; the foreground-nudge title match uses
-  a wildcard `-like` and could in theory match an unrelated Windows Terminal window with a
-  coincidentally similar tab title.
+  first turn-stop; blank model line if a hook omits `model`.
 
 ## Desktop app (Electron), the sanctioned exception to zero-dependency
 `desktop/` wraps the unchanged backend in an Electron window and packages it as a Windows MSI.
@@ -136,8 +143,27 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
   still works.
 - MSI via electron-builder; the `upgradeCode` GUID in `desktop/electron-builder.yml` must NEVER
   change (it is what makes a newer MSI upgrade in place).
+- Native notifications: `desktop/main.mjs` subscribes to the server's `/stream` SSE and raises an
+  Electron `Notification` when a session transitions into `needs-permission` or `awaiting` (one
+  toast per transition; the initial snapshot and any reconnect only seed known statuses, so
+  pre-existing blocked sessions do not all fire at once). Clicking the toast `POST /focus`es that
+  session's terminal and raises the app window. This lives only in the desktop shell; the server
+  stays zero-dependency.
 - Releases: publish a GitHub release tagged `fleet-vX.Y.Z` and
   `.github/workflows/fleet-desktop-msi.yml` builds and attaches the MSI. See `desktop/README.md`.
+- Auto-update: `desktop/update-check.mjs` detects a newer `fleet-v*` tag AND downloads its MSI via
+  the locally authenticated `gh` CLI (`gh release download`, no baked-in token). The banner and the
+  Fleet menu offer "Download & install"; accepting downloads the MSI, launches `msiexec /i`, and
+  quits so the in-place upgrade is not blocked. The banner button reaches the main process through
+  `desktop/preload.cjs` (contextBridge `window.cmcUpdate.install()` -> `ipcMain` `cmc:install-update`).
+  Falls back to the releases page on any gh failure. End-to-end proof needs a published newer tag.
+
+## CI
+`.github/workflows/ci.yml` runs on PRs and pushes to `main` (separate from the release MSI
+builder). It `node --check`s every `*.mjs` under `claude-mission-control/` and boots the server via
+`scripts/smoke-server.mjs` (hermetic temp HOME, checks `/`, `/repos`, `/stream`, one hook event).
+Zero-dependency, so there is nothing to install. `scripts/smoke-server.mjs` also runs locally:
+`node scripts/smoke-server.mjs`.
 
 ## Docs
 - `docs/plans/` - implementation plans.

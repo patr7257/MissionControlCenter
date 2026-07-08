@@ -11,6 +11,7 @@ asar: false
 files:
   - main.mjs
   - update-check.mjs
+  - preload.cjs
 extraResources:
   # Ship the existing zero-dependency backend + UI unchanged under resources/backend.
   # "*.mjs" (not an explicit list) so new backend modules are picked up automatically.

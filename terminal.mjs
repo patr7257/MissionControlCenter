@@ -141,13 +141,24 @@ const FOREGROUND_HELPER_TYPE =
 // Matched by window title (the active tab's title, which every launch/reattach sets
 // with --title): wt.exe reuses a single process per named window, so there is no
 // per-tab PID to target, only the title of whichever tab is now on top.
+//
+// The match is exact-first: prefer a WindowsTerminal process whose MainWindowTitle
+// equals the tab title we set, and only fall back to the broad `-like '*title*'`
+// wildcard when no exact match exists. The old wildcard-only match could raise an
+// unrelated Windows Terminal window whose tab title merely contained this string
+// (known-minor risk called out in CLAUDE.md); the exact pass removes that in the
+// common case while the fallback keeps working if WT decorates the window title.
 function bringToForeground(title) {
   try {
     if (!title || process.env.CMC_DRY_RUN) return;
+    const quotedTitle = psQuote(title);
+    const quotedWildcard = psQuote('*' + title + '*');
     const script =
       'Add-Type -Namespace CmcWin32 -Name Native -MemberDefinition ' + psQuote(FOREGROUND_HELPER_TYPE) + ' -ErrorAction SilentlyContinue; ' +
       'Start-Sleep -Milliseconds 400; ' +
-      '$p = Get-Process -Name WindowsTerminal -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like ' + psQuote('*' + title + '*') + ' } | Select-Object -First 1; ' +
+      '$procs = Get-Process -Name WindowsTerminal -ErrorAction SilentlyContinue; ' +
+      '$p = $procs | Where-Object { $_.MainWindowTitle -eq ' + quotedTitle + ' } | Select-Object -First 1; ' +
+      'if (-not $p) { $p = $procs | Where-Object { $_.MainWindowTitle -like ' + quotedWildcard + ' } | Select-Object -First 1 } ' +
       'if ($p -and $p.MainWindowHandle -ne 0) { [CmcWin32.Native]::ShowWindow($p.MainWindowHandle, 9) | Out-Null; [CmcWin32.Native]::SetForegroundWindow($p.MainWindowHandle) | Out-Null }';
     spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', script], {
       detached: true,

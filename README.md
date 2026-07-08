@@ -51,6 +51,14 @@ node stop.mjs
 the server. Runtime data (a lock file and an event log) lives under
 `~/.claude/agent-fleet-monitor/`, outside this repo.
 
+## Desktop app (Windows MSI)
+
+There is also an Electron desktop build that wraps this same backend and installs as a Windows
+MSI, with native notifications when a session needs your input. See
+[`desktop/README.md`](desktop/README.md) for building, releasing, and installing. Note: the MSI
+is unsigned, so Windows SmartScreen shows an "unknown publisher" warning on first run; the
+install steps (More info, then Run anyway) are in that README.
+
 ## How it is wired as a Claude Code skill
 
 This repo is the source of truth. It is linked into `~/.claude/skills/agent-fleet-monitor` with a
