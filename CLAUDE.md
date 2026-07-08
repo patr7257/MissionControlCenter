@@ -152,6 +152,13 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
 - Releases: publish a GitHub release tagged `fleet-vX.Y.Z` and
   `.github/workflows/fleet-desktop-msi.yml` builds and attaches the MSI. See `desktop/README.md`.
 
+## CI
+`.github/workflows/ci.yml` runs on PRs and pushes to `main` (separate from the release MSI
+builder). It `node --check`s every `*.mjs` under `claude-mission-control/` and boots the server via
+`scripts/smoke-server.mjs` (hermetic temp HOME, checks `/`, `/repos`, `/stream`, one hook event).
+Zero-dependency, so there is nothing to install. `scripts/smoke-server.mjs` also runs locally:
+`node scripts/smoke-server.mjs`.
+
 ## Docs
 - `docs/plans/` - implementation plans.
 - `docs/specs/` - design specs.

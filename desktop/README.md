@@ -26,6 +26,34 @@ Output: `dist\Claude Mission Control-<version>.msi`. Per-user install (no UAC) i
 registers hooks pointing at `resources\backend\send-event.mjs.cmd`, which runs the bundled
 Electron binary as plain Node, so the machine needs no system Node.
 
+## Installing the MSI (SmartScreen warning is expected)
+
+The MSI is unsigned, so on the first run Windows SmartScreen shows a blue
+"Windows protected your PC" dialog naming an unknown publisher. This is expected
+until code signing is added (see below); the installer is safe to run. To proceed:
+
+1. Double-click the `.msi`.
+2. On the SmartScreen dialog, click "More info".
+3. Click "Run anyway".
+4. The install is per-user into `%LOCALAPPDATA%\Programs`, so there is no UAC
+   admin prompt.
+
+If a browser flagged the download itself, choose "Keep" on the download first.
+
+## Code signing (future)
+
+Not done yet: an Authenticode code-signing certificate removes the SmartScreen
+warning for good. When a certificate is available, wire it into the release
+workflow rather than signing by hand:
+
+- Store the certificate (PFX, base64) and its password as GitHub Actions secrets.
+- In `.github/workflows/fleet-desktop-msi.yml`, set electron-builder's signing env
+  (`CSC_LINK`, `CSC_KEY_PASSWORD`) on the Build MSI step and drop the
+  `CSC_IDENTITY_AUTO_DISCOVERY: "false"` line that currently forces an unsigned build.
+- An OV certificate still needs reputation to build before SmartScreen trusts it; an
+  EV certificate (hardware token) is trusted immediately but cannot live as a plain
+  CI secret. Decide the certificate type before wiring this up.
+
 ## Releases (CI-built MSI)
 
 Publishing a GitHub release with a tag like `fleet-v0.2.0` triggers
