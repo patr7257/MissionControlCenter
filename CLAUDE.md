@@ -23,7 +23,13 @@ See `docs/plans/` and `docs/specs/` for the design and roadmap.
 
 ## Architecture
 - `server.mjs` - zero-dependency Node server: serves `public/**`, a Server-Sent Events stream
-  (`/stream`), and ingests Claude Code hook events (`POST /event`). Keeps an in-memory model.
+  (`/stream`), and ingests Claude Code hook events (`POST /event`). Keeps an in-memory model that
+  is also persisted to `~/.claude/agent-fleet-monitor/sessions.json` (debounced writes, skipped
+  under `CMC_DRY_RUN`) so a restart rehydrates the board instead of starting empty. On load it
+  prunes entries older than 7 days (24h for ended sessions), caps the file at 200 newest, and
+  downgrades any in-flight status (`working`/`awaiting`/`needs-permission`) to `recent` + not-live
+  since a persisted session was not seen live this run; hooks re-upgrade it on the next event.
+  Rehydrate runs before the backfill scan (which skips ids already present) and before hooks fire.
 - Hooks: `install-hooks.mjs` merges a set of hooks into `~/.claude/settings.json` while active;
   `uninstall-hooks.mjs` removes exactly those; `send-event.mjs` is the per-hook shim that POSTs
   to the server and no-ops instantly when the server is down. `start.mjs` / `stop.mjs`
@@ -137,6 +143,12 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
   still works.
 - MSI via electron-builder; the `upgradeCode` GUID in `desktop/electron-builder.yml` must NEVER
   change (it is what makes a newer MSI upgrade in place).
+- Native notifications: `desktop/main.mjs` subscribes to the server's `/stream` SSE and raises an
+  Electron `Notification` when a session transitions into `needs-permission` or `awaiting` (one
+  toast per transition; the initial snapshot and any reconnect only seed known statuses, so
+  pre-existing blocked sessions do not all fire at once). Clicking the toast `POST /focus`es that
+  session's terminal and raises the app window. This lives only in the desktop shell; the server
+  stays zero-dependency.
 - Releases: publish a GitHub release tagged `fleet-vX.Y.Z` and
   `.github/workflows/fleet-desktop-msi.yml` builds and attaches the MSI. See `desktop/README.md`.
 

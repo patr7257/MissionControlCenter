@@ -21,6 +21,16 @@ const HOME = os.homedir();
 const DATA_DIR = path.join(HOME, '.claude', 'agent-fleet-monitor');
 const LOCK_FILE = path.join(DATA_DIR, 'server.lock');
 const LOG_FILE = path.join(DATA_DIR, 'log.jsonl');
+// Sessions model is persisted here so a server restart (dev reload, machine
+// reboot) does not lose the board. Rehydrated on start and merged with the
+// backfill scan; writes are debounced and skipped under CMC_DRY_RUN.
+const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+// Persisted sessions older than this (by lastActivityAt) are dropped on load so
+// the file cannot grow without bound. Ended sessions get a shorter horizon since
+// they carry no future activity. A hard count cap backs both up.
+const SESSIONS_PERSIST_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7d
+const SESSIONS_ENDED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+const SESSIONS_MAX_PERSISTED = 200;
 
 // Port: default 4317, override with --port <n>
 function readPortArg() {
@@ -99,6 +109,7 @@ function serializeSession(s) {
 
 function pushSession(s) {
   broadcast({ type: 'session', session: serializeSession(s) });
+  scheduleSaveSessions();
 }
 
 function snapshotPayload() {
@@ -285,6 +296,66 @@ function ensureSession(id, cwd, transcriptPath) {
     sessions.set(id, session);
   }
   return session;
+}
+
+// ---------------------------------------------------------------------------
+// Session persistence (best effort, never throws)
+// ---------------------------------------------------------------------------
+// Debounced write of the whole sessions map. Coalesces the bursty mutations of
+// a single turn into one disk write. Skipped entirely under CMC_DRY_RUN so test
+// runs never touch the real persisted state.
+let saveSessionsTimer = null;
+function scheduleSaveSessions() {
+  if (process.env.CMC_DRY_RUN) return;
+  if (saveSessionsTimer) return;
+  saveSessionsTimer = setTimeout(() => {
+    saveSessionsTimer = null;
+    saveSessionsNow();
+  }, 1000);
+}
+
+function saveSessionsNow() {
+  if (process.env.CMC_DRY_RUN) return;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    // Newest first, then cap: an unbounded map would grow the file forever. The
+    // full internal session objects (including transcript/source) are persisted;
+    // serializeSession is only for the wire format.
+    const arr = Array.from(sessions.values()).sort(
+      (a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0)
+    );
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(arr.slice(0, SESSIONS_MAX_PERSISTED)));
+  } catch {
+    // best effort only
+  }
+}
+
+// Rehydrate persisted sessions on start, before the backfill scan (which skips
+// any id already present) and before hooks fire (which upgrade them again). Old
+// and long-ended sessions are pruned here so the file self-trims over time.
+function loadPersistedSessions() {
+  if (process.env.CMC_DRY_RUN) return;
+  try {
+    const arr = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+    if (!Array.isArray(arr)) return;
+    const now = nowMs();
+    for (const s of arr) {
+      if (!s || !s.id || sessions.has(s.id)) continue;
+      const age = now - (s.lastActivityAt || 0);
+      if (age > SESSIONS_PERSIST_MAX_AGE_MS) continue;
+      if (s.status === 'ended' && age > SESSIONS_ENDED_MAX_AGE_MS) continue;
+      // This session was not seen live this run: it is not connected until a hook
+      // says otherwise, and any in-flight status would be a stale spinner, so
+      // downgrade it to 'recent'. Live hooks re-upgrade it on the next event.
+      s.live = false;
+      if (s.status === 'working' || s.status === 'awaiting' || s.status === 'needs-permission') {
+        s.status = 'recent';
+      }
+      sessions.set(s.id, s);
+    }
+  } catch {
+    // no persisted state yet, or unreadable: start fresh
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +658,7 @@ function backfillSessions() {
 
     const historyIndex = buildHistoryIndex();
 
+    let added = 0;
     for (const c of chosen) {
       if (sessions.has(c.id)) continue; // never downgrade a hook-tracked session
       const meta = readSessionMetaFromTranscript(c.filePath);
@@ -620,7 +692,11 @@ function backfillSessions() {
         source: 'backfill',
         transcript: c.filePath,
       });
+      added += 1;
     }
+    // Only persist when the scan actually added something, so the 30s interval
+    // does not rewrite the file on every idle tick.
+    if (added > 0) scheduleSaveSessions();
   } catch {
     // backfill is best effort; never throw
   }
@@ -819,11 +895,15 @@ server.listen(PORT, '127.0.0.1', () => {
     // if we cannot write the lock, the shim simply will not find us (safe)
   }
   process.stdout.write(`agent-fleet-monitor listening at http://localhost:${PORT}\n`);
+  loadPersistedSessions();
   backfillSessions();
   setInterval(backfillSessions, 30000);
 });
 
 function shutdown() {
+  // Flush any pending debounced session write so a clean stop does not lose the
+  // last mutation. Best effort; saveSessionsNow never throws.
+  saveSessionsNow();
   try {
     const lock = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8'));
     if (lock && lock.pid === process.pid) fs.rmSync(LOCK_FILE, { force: true });

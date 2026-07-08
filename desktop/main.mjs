@@ -4,7 +4,7 @@
 // (so it survives closing this window, same model as start.mjs), then shows
 // the dashboard in a native window instead of a browser tab.
 
-import { app, BrowserWindow, Menu, dialog, shell } from 'electron';
+import { app, BrowserWindow, Menu, dialog, shell, Notification } from 'electron';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,6 +27,8 @@ const BACKEND = app.isPackaged
   : path.join(app.getAppPath(), '..');
 
 let mainWin = null;
+// Set on before-quit so the SSE notification loop stops retrying during shutdown.
+let quitting = false;
 
 function pidAlive(pid) {
   try {
@@ -158,6 +160,94 @@ async function notifyUpdateBanner(win) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Native desktop notifications
+// ---------------------------------------------------------------------------
+// Only these session statuses are worth interrupting the user for: the two that
+// mean "this session is blocked waiting on you". This lives only in the desktop
+// shell; the zero-dependency server just broadcasts status on its SSE stream.
+const ALERT_STATUSES = new Set(['needs-permission', 'awaiting']);
+// sessionId -> the last status we observed, so one state change is one toast and
+// a stream of same-status events does not re-fire.
+const lastSeenStatus = new Map();
+
+function postFocus(port, sessionId) {
+  fetch(`http://127.0.0.1:${port}/focus`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId }),
+  }).catch(() => {});
+}
+
+// Decide whether a session update warrants a toast, and raise it. `seedOnly`
+// records the status without notifying: used for the initial snapshot (and after
+// a reconnect) so pre-existing blocked sessions do not all fire at once.
+function maybeNotify(port, s, seedOnly) {
+  if (!s || !s.id) return;
+  const prev = lastSeenStatus.get(s.id);
+  lastSeenStatus.set(s.id, s.status);
+  if (seedOnly) return;
+  if (!ALERT_STATUSES.has(s.status)) return;
+  if (prev === s.status) return; // not a transition; already alerted
+  if (!Notification.isSupported()) return;
+  const label = s.status === 'needs-permission' ? 'Needs permission' : 'Waiting for input';
+  const where = s.project || s.cwd || 'a session';
+  const n = new Notification({
+    title: `Claude Mission Control: ${label}`,
+    body: s.lastPrompt ? `${where}: ${s.lastPrompt}` : where,
+  });
+  n.on('click', () => {
+    postFocus(port, s.id);
+    if (mainWin && !mainWin.isDestroyed()) {
+      if (mainWin.isMinimized()) mainWin.restore();
+      mainWin.focus();
+    }
+  });
+  n.show();
+}
+
+// Consume the server's SSE stream and raise a native notification whenever a
+// session transitions into a blocked status. Reconnects on drop; stops on quit.
+async function subscribeNotifications(port) {
+  const url = `http://127.0.0.1:${port}/stream`;
+  while (!quitting) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok || !res.body) throw new Error('stream not ok');
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const dataLine = frame.split('\n').find((l) => l.startsWith('data: '));
+          if (!dataLine) continue;
+          let obj;
+          try {
+            obj = JSON.parse(dataLine.slice(6));
+          } catch {
+            continue;
+          }
+          if (obj.type === 'snapshot' && Array.isArray(obj.sessions)) {
+            for (const s of obj.sessions) maybeNotify(port, s, true);
+          } else if (obj.type === 'session' && obj.session) {
+            maybeNotify(port, obj.session, false);
+          }
+        }
+      }
+    } catch {
+      // stream dropped or server not up yet: retry below
+    }
+    if (quitting) return;
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+}
+
 function buildMenu() {
   const template = [
     {
@@ -215,6 +305,8 @@ async function startApp() {
   if (up) {
     await mainWin.loadURL(dashUrl);
     notifyUpdateBanner(mainWin);
+    const port = Number(new URL(dashUrl).port) || DEFAULT_PORT;
+    subscribeNotifications(port);
   } else {
     await mainWin.loadURL(errorPage());
   }
@@ -223,6 +315,9 @@ async function startApp() {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
+  app.on('before-quit', () => {
+    quitting = true;
+  });
   app.on('second-instance', () => {
     if (mainWin) {
       if (mainWin.isMinimized()) mainWin.restore();
