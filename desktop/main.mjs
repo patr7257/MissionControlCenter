@@ -4,13 +4,13 @@
 // (so it survives closing this window, same model as start.mjs), then shows
 // the dashboard in a native window instead of a browser tab.
 
-import { app, BrowserWindow, Menu, dialog, shell, Notification } from 'electron';
+import { app, BrowserWindow, Menu, dialog, shell, Notification, ipcMain } from 'electron';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { findNewerRelease, RELEASES_URL } from './update-check.mjs';
+import { findNewerRelease, downloadReleaseMsi, RELEASES_URL } from './update-check.mjs';
 
 const DEFAULT_PORT = 4317;
 const DATA_DIR = path.join(os.homedir(), '.claude', 'agent-fleet-monitor');
@@ -108,6 +108,39 @@ function stopServerAndRemoveHooks() {
   child.on('error', () => app.quit());
 }
 
+// Launch the downloaded MSI and quit so the in-place upgrade is not blocked by
+// this app's locked files. msiexec /i shows the (oneClick:false) installer UI;
+// electron-builder's runAfterFinish relaunches the app when it finishes.
+function launchInstaller(msiPath) {
+  try {
+    spawn('msiexec', ['/i', msiPath], { detached: true, stdio: 'ignore' }).unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Download the MSI for `tag` via the gh CLI, then launch it and quit. On any
+// failure, fall back to the manual releases page rather than leaving the user
+// stuck after they opted in.
+async function downloadAndInstall(tag) {
+  const msi = await downloadReleaseMsi(tag);
+  if (!msi || !launchInstaller(msi)) {
+    const { response } = await dialog.showMessageBox(mainWin, {
+      type: 'error',
+      message: 'Could not download the update automatically.',
+      detail: 'The gh CLI may be missing, offline, or not authenticated. You can download the MSI by hand from the releases page.',
+      buttons: ['Open releases page', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (response === 0) shell.openExternal(RELEASES_URL);
+    return false;
+  }
+  app.quit();
+  return true;
+}
+
 async function checkUpdatesInteractive() {
   const tag = await findNewerRelease(app.getVersion());
   if (!tag) {
@@ -121,11 +154,13 @@ async function checkUpdatesInteractive() {
   const { response } = await dialog.showMessageBox(mainWin, {
     type: 'info',
     message: `Update available: ${tag}`,
-    detail: 'Download the new MSI from the GitHub releases page and run it. It upgrades in place.',
-    buttons: ['Open releases page', 'Later'],
+    detail: 'Download and install now (the app closes while the installer runs, then reopens), or open the releases page to do it by hand.',
+    buttons: ['Download and install', 'Open releases page', 'Later'],
     defaultId: 0,
+    cancelId: 2,
   });
-  if (response === 0) shell.openExternal(RELEASES_URL);
+  if (response === 0) await downloadAndInstall(tag);
+  else if (response === 1) shell.openExternal(RELEASES_URL);
 }
 
 async function notifyUpdateBanner(win) {
@@ -142,6 +177,17 @@ async function notifyUpdateBanner(win) {
         'display:flex;gap:12px;align-items:center;';
       var text = document.createElement('span');
       text.textContent = 'Update available: ${tag}';
+      var install = document.createElement('button');
+      install.textContent = 'Download & install';
+      install.style.cssText = 'cursor:pointer;border:0;border-radius:6px;' +
+        'background:#2563eb;color:#fff;padding:6px 10px;font:13px system-ui,sans-serif;';
+      install.onclick = function () {
+        if (!window.cmcUpdate) return;
+        install.textContent = 'Downloading...';
+        install.disabled = true;
+        install.style.opacity = '.7';
+        window.cmcUpdate.install();
+      };
       var link = document.createElement('a');
       link.href = '${RELEASES_URL}';
       link.target = '_blank';
@@ -151,7 +197,7 @@ async function notifyUpdateBanner(win) {
       close.textContent = 'x';
       close.style.cssText = 'cursor:pointer;opacity:.7;padding:0 4px;';
       close.onclick = function () { b.remove(); };
-      b.appendChild(text); b.appendChild(link); b.appendChild(close);
+      b.appendChild(text); b.appendChild(install); b.appendChild(link); b.appendChild(close);
       document.body.appendChild(b);
     })();`;
     win.webContents.executeJavaScript(js).catch(() => {});
@@ -282,6 +328,15 @@ function errorPage() {
 
 async function startApp() {
   buildMenu();
+
+  // Banner "Download & install" button (renderer) invokes this in the main
+  // process. Re-resolves the newest tag so it always installs the latest.
+  ipcMain.handle('cmc:install-update', async () => {
+    const tag = await findNewerRelease(app.getVersion());
+    if (!tag) return { ok: false };
+    return { ok: await downloadAndInstall(tag) };
+  });
+
   await ensureHooks();
   ensureServer();
 
@@ -290,7 +345,11 @@ async function startApp() {
     height: 820,
     title: 'Claude Mission Control',
     autoHideMenuBar: false,
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(app.getAppPath(), 'preload.cjs'),
+    },
   });
   mainWin.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);

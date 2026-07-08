@@ -68,4 +68,10 @@ attaches it to the release. Rules:
 
 The app checks for newer `fleet-v*` releases via the locally authenticated `gh` CLI
 (private repo, so no anonymous API and no baked-in token). If `gh` is missing the check
-silently does nothing. "Check for updates" in the Fleet menu does the same on demand.
+silently does nothing. When a newer release exists, a bottom-right banner offers "Download &
+install", and "Check for updates" in the Fleet menu offers the same on demand. Accepting it
+uses `gh release download` to fetch the new MSI, launches it with `msiexec /i`, and quits the
+app so the in-place upgrade is not blocked by locked files (`runAfterFinish` reopens the app
+when the installer finishes). If the download fails (no `gh`, offline, not authed), it falls
+back to opening the releases page for a manual download. This is validated end-to-end only by
+publishing a newer `fleet-v*` release and updating from an older installed build.

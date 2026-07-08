@@ -151,6 +151,12 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
   stays zero-dependency.
 - Releases: publish a GitHub release tagged `fleet-vX.Y.Z` and
   `.github/workflows/fleet-desktop-msi.yml` builds and attaches the MSI. See `desktop/README.md`.
+- Auto-update: `desktop/update-check.mjs` detects a newer `fleet-v*` tag AND downloads its MSI via
+  the locally authenticated `gh` CLI (`gh release download`, no baked-in token). The banner and the
+  Fleet menu offer "Download & install"; accepting downloads the MSI, launches `msiexec /i`, and
+  quits so the in-place upgrade is not blocked. The banner button reaches the main process through
+  `desktop/preload.cjs` (contextBridge `window.cmcUpdate.install()` -> `ipcMain` `cmc:install-update`).
+  Falls back to the releases page on any gh failure. End-to-end proof needs a published newer tag.
 
 ## CI
 `.github/workflows/ci.yml` runs on PRs and pushes to `main` (separate from the release MSI

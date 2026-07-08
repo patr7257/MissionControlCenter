@@ -4,6 +4,9 @@
 // authed, bad JSON) resolves to "no update" silently.
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const REPO = 'przrm/patrick-setup-and-features-improvements';
 const TAG_PREFIX = 'fleet-v';
@@ -66,6 +69,65 @@ function isNewer(a, b) {
     if (a[i] !== b[i]) return a[i] > b[i];
   }
   return false;
+}
+
+// Download the MSI asset of a given release tag using the locally authenticated
+// gh CLI (same private-repo, no-baked-token model as findNewerRelease). Returns
+// the absolute path to the downloaded .msi, or null on any failure (no gh,
+// offline, not authed, no MSI asset, timeout). Never throws.
+export async function downloadReleaseMsi(tag) {
+  if (!tag) return null;
+  let dir;
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmc-update-'));
+  } catch {
+    return null;
+  }
+  const ok = await new Promise((resolve) => {
+    let settled = false;
+    const finish = (v) => {
+      if (!settled) {
+        settled = true;
+        resolve(v);
+      }
+    };
+    let child;
+    try {
+      // shell:true so gh.exe resolves via PATH on Windows. --clobber so a retry
+      // into the same temp dir does not fail on an existing partial file.
+      child = spawn(
+        'gh',
+        ['release', 'download', tag, '--repo', REPO, '--pattern', '*.msi', '--dir', dir, '--clobber'],
+        { shell: true, windowsHide: true }
+      );
+    } catch {
+      return finish(false);
+    }
+    // Generous: an MSI is tens of MB and the network may be slow.
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // already gone
+      }
+      finish(false);
+    }, 120000);
+    child.on('error', () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      finish(code === 0);
+    });
+  });
+  if (!ok) return null;
+  try {
+    const msi = fs.readdirSync(dir).find((f) => f.toLowerCase().endsWith('.msi'));
+    return msi ? path.join(dir, msi) : null;
+  } catch {
+    return null;
+  }
 }
 
 // Returns the newest fleet-v tag strictly newer than currentVersion, or null.
