@@ -142,6 +142,11 @@ The zero-runtime-dependency rule still applies to the server and `public/` UI; `
 one place where npm devDependencies (electron, electron-builder) are allowed. Key facts:
 - `desktop/main.mjs` spawns `../server.mjs` detached with `ELECTRON_RUN_AS_NODE=1` (lock file,
   `stop.mjs`, and the shim keep working unchanged) and loads `http://127.0.0.1:4317`.
+- Shutdown: closing the window (X), the Fleet menu "Quit", and "Stop server and remove hooks" all
+  run the same guarded teardown (`stopServerAndRemoveHooks` -> `stop.mjs`: stop the detached server
+  via the lock file + remove hooks, then `app.quit()`). It runs once per session and always quits
+  even if `stop.mjs` fails. A fresh launch re-installs hooks and restarts the server. (This replaced
+  the old survive-close behavior where the detached server kept running after the window closed.)
 - Packaged installs register hooks via `resources\backend\send-event.mjs.cmd` (Electron-as-Node
   wrapper, no system Node needed); `install-hooks.mjs` honours the `CMC_HOOK_COMMAND` env
   override for this. The filename contains `send-event.mjs` on purpose so `SHIM_MARK` matching

@@ -102,7 +102,16 @@ async function waitForServer(timeoutMs) {
   return false;
 }
 
+// Full teardown: stop the detached server (via its lock file) and remove the
+// Claude Code hooks, then quit. Runs once per session (guarded) so the window-X
+// path, the menu action, and the menu Quit never trigger it twice or race. Sets
+// `quitting` so the SSE notification loop stops retrying during shutdown. Always
+// quits even if stop.mjs fails, so the app never hangs on close.
+let tearingDown = false;
 function stopServerAndRemoveHooks() {
+  if (tearingDown) return;
+  tearingDown = true;
+  quitting = true;
   const child = runAsNode(path.join(BACKEND, 'stop.mjs'));
   child.on('close', () => app.quit());
   child.on('error', () => app.quit());
@@ -309,7 +318,9 @@ function buildMenu() {
           label: 'Stop server and remove hooks',
           click: () => stopServerAndRemoveHooks(),
         },
-        { role: 'quit' },
+        // Quit also runs the full teardown so the server + hooks never leak,
+        // matching the window-close (X) behavior.
+        { label: 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => stopServerAndRemoveHooks() },
       ],
     },
     { role: 'viewMenu' },
@@ -383,9 +394,10 @@ if (!app.requestSingleInstanceLock()) {
       mainWin.focus();
     }
   });
-  // Closing the window quits the shell; the detached server keeps running,
-  // exactly like closing the browser tab today. Stopping for real is the
-  // explicit menu action (or node stop.mjs).
-  app.on('window-all-closed', () => app.quit());
+  // Closing the window (the X) now shuts everything down: it stops the detached
+  // server and removes the hooks before quitting, so nothing is left running in
+  // the background. (Previously the shell quit but the server kept running like
+  // a closed browser tab.)
+  app.on('window-all-closed', () => stopServerAndRemoveHooks());
   app.whenReady().then(startApp);
 }

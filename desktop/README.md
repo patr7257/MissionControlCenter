@@ -3,8 +3,9 @@
 Electron shell around the existing zero-dependency mission control backend. The backend
 (`../server.mjs` and friends) runs unchanged as a detached process; this app just ensures the
 hooks and server, then shows `http://127.0.0.1:4317` in a native window. Closing the window
-leaves the monitor running, exactly like closing the browser tab. The menu action
-"Stop server and remove hooks" is the real off switch.
+(the X), the Fleet menu "Quit", and the menu "Stop server and remove hooks" all run the same
+full teardown: they stop the detached server and remove the hooks before quitting, so nothing
+is left running in the background. (A fresh launch re-installs the hooks and restarts the server.)
 
 ## Dev loop
 
