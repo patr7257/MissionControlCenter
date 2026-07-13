@@ -59,9 +59,12 @@
     syncAll();
   }
 
+  // Not registered with the Store directly anymore: the combined 'detail' view
+  // (see index.html) delegates to ViewCards for the professional lanes and to
+  // ViewOffice for the scene, rendering both together in #viewDetail.
   window.ViewCards = {
     id: 'cards',
-    el: document.getElementById('viewCards'),
+    el: document.getElementById('viewDetail'),
     activate: function () { syncAll(); },
     deactivate: function () {},
     reset: function () { syncAll(); },

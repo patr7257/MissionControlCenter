@@ -16,6 +16,69 @@
     recent: 'var(--muted)', ended: '#5a6172'
   };
 
+  // ---- Filters (persisted in localStorage; default to showing everything so
+  // the board looks unchanged until the user narrows it) ----
+  var FILTER_KEYS = { state: 'fleetFltState', time: 'fleetFltTime', repo: 'fleetFltRepo' };
+  var filters = { state: 'all', time: 'all', repo: '' };
+  function loadFilters() {
+    try {
+      filters.state = localStorage.getItem(FILTER_KEYS.state) || 'all';
+      filters.time = localStorage.getItem(FILTER_KEYS.time) || 'all';
+      filters.repo = localStorage.getItem(FILTER_KEYS.repo) || '';
+    } catch (e) {}
+  }
+  function saveFilter(key, val) { try { localStorage.setItem(FILTER_KEYS[key], val); } catch (e) {} }
+  loadFilters();
+
+  // Active = connected right now, or in a state that is waiting on the user.
+  // Everything else (ended, or an old backfilled "recent" that is not live) is
+  // treated as closed/previous.
+  function isActiveSession(s) {
+    return s.live === true || s.status === 'working' || s.status === 'awaiting' || s.status === 'needs-permission';
+  }
+  function isToday(ts) {
+    if (!ts) return false;
+    var d = new Date(ts), n = new Date();
+    return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+  }
+  function passesFilters(s) {
+    if (filters.state === 'active' && !isActiveSession(s)) return false;
+    if (filters.state === 'closed' && isActiveSession(s)) return false;
+    if (filters.time === 'today' && !isToday(s.lastActivityAt)) return false;
+    if (filters.repo && (s.project || '') !== filters.repo) return false;
+    return true;
+  }
+
+  // Rebuild the repo dropdown from the distinct projects currently tracked,
+  // preserving the selection (falling back to All if that repo is gone).
+  function populateRepoFilter() {
+    var sel = document.getElementById('fltRepo');
+    if (!sel) return;
+    var projects = {};
+    Store.sessions.forEach(function (s) { if (s.project) projects[s.project] = true; });
+    var names = Object.keys(projects).sort(function (a, b) { return a.localeCompare(b); });
+    sel.innerHTML = '';
+    var all = document.createElement('option'); all.value = ''; all.textContent = 'All repos'; sel.appendChild(all);
+    names.forEach(function (n) {
+      var o = document.createElement('option'); o.value = n; o.textContent = n; sel.appendChild(o);
+    });
+    if (filters.repo && names.indexOf(filters.repo) === -1) { filters.repo = ''; saveFilter('repo', ''); }
+    sel.value = filters.repo;
+  }
+
+  function initFilters() {
+    var st = document.getElementById('fltState');
+    var tm = document.getElementById('fltTime');
+    var rp = document.getElementById('fltRepo');
+    if (!st || st._wired) return;
+    st._wired = true;
+    st.value = filters.state;
+    tm.value = filters.time;
+    st.addEventListener('change', function () { filters.state = st.value; saveFilter('state', st.value); syncAll(); });
+    tm.addEventListener('change', function () { filters.time = tm.value; saveFilter('time', tm.value); syncAll(); });
+    rp.addEventListener('change', function () { filters.repo = rp.value; saveFilter('repo', rp.value); syncAll(); });
+  }
+
   function fmtRelative(ts) {
     if (!ts) return '';
     var diff = Date.now() - ts;
@@ -32,7 +95,7 @@
   }
 
   function sortedSessions() {
-    var list = Array.from(Store.sessions.values());
+    var list = Array.from(Store.sessions.values()).filter(passesFilters);
     list.sort(function (a, b) {
       var ra = STATUS_RANK.hasOwnProperty(a.status) ? STATUS_RANK[a.status] : 5;
       var rb = STATUS_RANK.hasOwnProperty(b.status) ? STATUS_RANK[b.status] : 5;
@@ -197,7 +260,16 @@
     list.forEach(function (s) { frag.appendChild(cards.get(s.id).el); });
     wrap.appendChild(frag);
     var empty = document.getElementById('sessionsEmpty');
-    if (empty) empty.style.display = list.length ? 'none' : '';
+    if (empty) {
+      if (list.length) {
+        empty.style.display = 'none';
+      } else {
+        empty.style.display = '';
+        empty.textContent = Store.sessions.size
+          ? 'No sessions match the current filters.'
+          : 'No sessions tracked yet. Start a Claude Code session and it will appear here.';
+      }
+    }
   }
 
   function loadRepos() {
@@ -272,12 +344,14 @@
     el: document.getElementById('viewSessions'),
     activate: function () {
       initNewSessionBar();
+      initFilters();
       loadRepos();
+      populateRepoFilter();
       syncAll();
     },
     deactivate: function () {},
-    reset: function () { syncAll(); },
+    reset: function () { populateRepoFilter(); syncAll(); },
     update: function () {},
-    sessionsChanged: function () { if (Store.getActiveId() === 'sessions') syncAll(); }
+    sessionsChanged: function () { if (Store.getActiveId() === 'sessions') { populateRepoFilter(); syncAll(); } }
   };
 })();

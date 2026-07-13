@@ -4,7 +4,7 @@ Project instructions for Claude. Read this first each session.
 
 ## What this is
 A local command center for Claude Code. Today it is a live dashboard of a single session's
-subagents (Pro cards + a Humaaans "Office" view). It is being extended into a machine-wide
+subagents (professional lanes + a Humaaans "Office" scene, combined per session). It is being extended into a machine-wide
 manager of all running Claude Code sessions across projects, with click-to-jump-to-terminal.
 See `docs/plans/` and `docs/specs/` for the design and roadmap.
 
@@ -34,11 +34,16 @@ See `docs/plans/` and `docs/specs/` for the design and roadmap.
   `uninstall-hooks.mjs` removes exactly those; `send-event.mjs` is the per-hook shim that POSTs
   to the server and no-ops instantly when the server is down. `start.mjs` / `stop.mjs`
   orchestrate.
-- Front-end (`public/`): `store.js` (data + SSE + view registry), `view-cards.js` (Pro),
-  `view-office.js` (Office), `humaaans.js` (recolorable character SVG templates), `style.css`,
-  `index.html` (shell + header toggle).
+- Front-end (`public/`): `store.js` (data + SSE + view registry), `view-cards.js` (professional
+  lanes) and `view-office.js` (2.5D office scene), `humaaans.js` (recolorable character SVG
+  templates), `style.css`, `index.html` (shell). There is no top-level Pro/Office toggle: the two
+  registered views are `sessions` (the board) and `detail` (a single combined per-session view that
+  renders the lanes AND the office scene together in `#viewDetail`). The combined view delegates to
+  `ViewCards` and `ViewOffice` (defined in their files but no longer registered separately) and is
+  only ever activated by `Store.selectSession`, so it never shows without a selected session.
 - The view interface: `{ id, el, activate(snap), deactivate(), reset(snap), update(agent) }`.
-  Only the active view receives updates.
+  Only the active view receives updates. Both `ViewCards` and `ViewOffice` scope to the selected
+  session via `Store.visibleAgents()` (agents carry `parentSession`).
 
 ## How it runs as a skill
 This repo is junction-linked into `~/.claude/skills/agent-fleet-monitor` (a Windows directory
@@ -71,7 +76,7 @@ and `docs/specs/session-discovery-findings.md`.
 ## Click-to-focus (one click on a session card)
 Clicking anywhere on a session card in the Sessions board calls `POST /focus` and jumps to that
 session's terminal; a small "Details" button (top right, shown on hover) drills into the
-Pro/Office subagent view instead (`Store.selectSession`). `terminal.focusSession()` in
+combined per-session subagent view instead (`Store.selectSession`). `terminal.focusSession()` in
 `terminal.mjs` NEVER spawns a tab: it only has two outcomes, `mode:'focused'` (a tab bound to this
 session, `wt -w cmc focus-tab -t <index>`, either bound earlier by a hook or lazily adopted on
 this very call) or `ok:false, mode:'unmanaged'` (nothing to jump to). Lazy adopt: if no tab is
