@@ -31,8 +31,9 @@ session shows as a card with a status: working, awaiting input, needs permission
 scan on startup, so sessions that were already running before the dashboard launched still
 show up.
 
-Clicking a session card drills into that session's Pro/Office subagent detail view (the
-same live card/office views described below, scoped to that one session). A repo picker at
+Clicking Details on a session card drills into that session's combined subagent detail view
+(the professional lanes and the office scene together, scoped to that one session). The board
+can be filtered by state (active vs closed), time (today vs all), and repo. A repo picker at
 the top of the Sessions board launches a new Claude Code session in a chosen repo, and each
 card has an Open button that focuses or reattaches that session's terminal.
 
@@ -80,10 +81,11 @@ This skill cannot pop up a dialog on its own (hooks do not ask questions). The p
 
 ## Notes
 
-- The dashboard has two live views, switchable in the header: "Pro" (professional cards) and
-  "Office" (an isometric Sims-style office where each subagent is an animated character that
-  walks in, works at a desk, and moves to a lounge when done). The choice is remembered per
-  browser. Both views render from the same live data.
+- Drilling into a session opens one combined detail view scoped to that session: the
+  professional cards (Working / Done / Errors lanes) and an isometric Sims-style office (each
+  subagent is an animated character that walks in, works at a desk, and moves to a lounge when
+  done) rendered together in the same area. There is no separate Pro/Office toggle; both render
+  from the same live data, scoped to the selected session.
 - Live updates require the localhost server; a Claude artifact cannot receive hook data (its
   sandbox blocks all localhost/network calls), so the live view is always a local page.
 - Tokens are read from each subagent's transcript when it finishes; while a subagent is

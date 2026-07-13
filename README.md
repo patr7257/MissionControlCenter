@@ -13,17 +13,19 @@ self-contained browser dashboard and receives Claude Code hook events over a loc
 anywhere on the machine, not just the current project. Each session card shows a live status
 (working / awaiting input / needs permission / idle-recent / ended), fed by user-level session
 hooks (`SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`, `SessionEnd`) plus a backfill
-scan on startup so already-running sessions show up too. A repo picker launches a new session in
+scan on startup so already-running sessions show up too. The board can be filtered by state
+(active vs closed), time (today vs all), and repo. A repo picker launches a new session in
 a chosen repo, and each card's Open button focuses or reattaches that session's terminal through
 a single managed Windows Terminal window named "cmc" (`terminal.mjs`). Focus is reliable for
 sessions the dashboard itself launched; sessions started elsewhere reattach into a fresh "cmc"
 tab via `claude --resume` instead of focusing an existing one, best effort only.
 
-**Per-session subagent monitor.** Click into a session for two live views of its subagents,
-switchable in the header and remembered per browser:
+**Per-session subagent monitor.** Click Details on a session to drill into one combined view of
+just that session's subagents (never a global mix across sessions or repos). Both dashboards render
+together in the same area:
 
-- **Pro** - professional cards in Working / Done / Errors lanes: agent type, task, the tool it is
-  using right now, elapsed time, steps, and token totals on completion.
+- **Professional lanes** - Working / Done / Errors cards: agent type, task, the tool it is using
+  right now, elapsed time, steps, and token totals on completion.
 - **Office** - a playful 2.5D office where each subagent is an illustrated character (Humaaans)
   that walks in, works at a desk, and moves to a lounge when finished.
 

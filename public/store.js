@@ -39,8 +39,11 @@
   }
   function selectSession(id) {
     selectedSessionId = id;
-    var wasActive = (activeId === 'cards');
-    setActive('cards');
+    // The combined per-session subagent view (lanes + office) is registered under
+    // 'detail'. It is only ever activated here, so it never shows without a
+    // selected session.
+    var wasActive = (activeId === 'detail');
+    setActive('detail');
     if (wasActive) { var v = active(); if (v) v.reset(snapshot()); }
   }
   function clearSession() {

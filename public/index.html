@@ -12,10 +12,6 @@
     <div class="conn" id="conn"><span class="led"></span><span id="connText">connecting</span></div>
     <div class="nav" id="nav">
       <button data-view="sessions" class="navbtn on" id="navSessions">Sessions</button>
-      <div class="toggle" id="toggle">
-        <button data-view="cards" class="on">Pro</button>
-        <button data-view="office">Office</button>
-      </div>
     </div>
     <div class="crumb" id="crumb" style="display:none">
       <button id="crumbBack">&#8592; Sessions</button>
@@ -31,24 +27,39 @@
 
   <div id="viewSessions" class="view active">
     <div class="new-session-bar" id="newSessionBar">
+      <label for="newSessionRepo" class="ns-label">Repos:</label>
       <select id="newSessionRepo" class="ns-select"><option value="">Loading repos...</option></select>
       <button id="newSessionBtn" class="ns-btn" type="button">New session</button>
       <span class="ns-feedback" id="newSessionFeedback"></span>
+    </div>
+    <div class="filter-bar" id="filterBar">
+      <label class="flt-label" for="fltState">Show:</label>
+      <select id="fltState" class="flt-select">
+        <option value="all">All</option>
+        <option value="active">Active</option>
+        <option value="closed">Closed</option>
+      </select>
+      <select id="fltTime" class="flt-select">
+        <option value="all">All time</option>
+        <option value="today">Today</option>
+      </select>
+      <select id="fltRepo" class="flt-select">
+        <option value="">All repos</option>
+      </select>
     </div>
     <div class="sessions-wrap" id="sessionsWrap"></div>
     <div class="empty sessions-empty" id="sessionsEmpty">No sessions tracked yet. Start a Claude Code session and it will appear here.</div>
   </div>
 
-  <div id="viewCards" class="view">
+  <div id="viewDetail" class="view">
     <main>
       <section class="lane working"><div class="lane-head"><span class="pip">&#9679;</span> Working <span class="count" id="cWorking">0</span></div><div class="lane-body" id="laneWorking"><div class="empty">No active agents</div></div></section>
       <section class="lane done"><div class="lane-head"><span class="pip">&#9679;</span> Done <span class="count" id="cDone">0</span></div><div class="lane-body" id="laneDone"><div class="empty">Nothing finished yet</div></div></section>
       <section class="lane error"><div class="lane-head"><span class="pip">&#9679;</span> Errors <span class="count" id="cError">0</span></div><div class="lane-body" id="laneError"><div class="empty">No errors</div></div></section>
     </main>
     <footer id="foot">Waiting for agents. Dispatch parallel subagents and they will appear here.</footer>
+    <div id="viewOffice"></div>
   </div>
-
-  <div id="viewOffice" class="view"></div>
 
   <script src="/store.js"></script>
   <script src="/view-sessions.js"></script>
@@ -57,18 +68,25 @@
   <script src="/view-office.js"></script>
   <script>
     (function () {
-      Store.registerView(ViewSessions);
-      Store.registerView(ViewCards);
-      Store.registerView(ViewOffice);
+      // Combined per-session detail view: the professional lanes AND the office
+      // scene rendered together in one area. Only reachable by drilling into a
+      // session (Store.selectSession); there is no global aggregate view anymore.
+      var ViewDetail = {
+        id: 'detail',
+        el: document.getElementById('viewDetail'),
+        activate: function (snap) { ViewCards.reset(snap); ViewOffice.activate(snap); },
+        deactivate: function () { ViewOffice.deactivate(); },
+        reset: function (snap) { ViewCards.reset(snap); ViewOffice.reset(snap); },
+        update: function (a) { ViewCards.update(a); ViewOffice.update(a); }
+      };
 
-      var saved = null; try { saved = localStorage.getItem('fleetView'); } catch (e) {}
-      var detailStart = (saved === 'office') ? 'office' : 'cards';
+      Store.registerView(ViewSessions);
+      Store.registerView(ViewDetail);
 
       function updateCrumb() {
         var crumb = document.getElementById('crumb');
         var nav = document.getElementById('nav');
-        var active = Store.getActiveId();
-        var inDetail = (active === 'cards' || active === 'office') && Store.selectedSessionId;
+        var inDetail = Store.getActiveId() === 'detail' && Store.selectedSessionId;
         crumb.style.display = inDetail ? '' : 'none';
         nav.style.display = inDetail ? 'none' : '';
         if (inDetail) {
@@ -78,32 +96,16 @@
         }
       }
 
-      document.querySelectorAll('#toggle button').forEach(function (b) {
-        b.addEventListener('click', function () {
-          var id = b.getAttribute('data-view');
-          Store.setActive(id);
-          detailStart = id;
-          document.querySelectorAll('#toggle button').forEach(function (x) { x.classList.toggle('on', x === b); });
-          updateCrumb();
-        });
-      });
       document.getElementById('navSessions').addEventListener('click', function () { Store.clearSession(); });
       document.getElementById('crumbBack').addEventListener('click', function () { Store.clearSession(); });
 
-      document.querySelectorAll('#toggle button').forEach(function (x) { x.classList.toggle('on', x.getAttribute('data-view') === detailStart); });
       Store.setActive('sessions');
       updateCrumb();
       Store.connect();
 
-      // Store.selectSession() (called by view-sessions.js on card click) always
-      // opens the Pro detail per the store contract; refresh the crumb + toggle after it runs.
+      // Refresh the breadcrumb whenever a session is opened or closed.
       var origSelect = Store.selectSession;
-      Store.selectSession = function (id) {
-        origSelect(id);
-        detailStart = 'cards';
-        document.querySelectorAll('#toggle button').forEach(function (x) { x.classList.toggle('on', x.getAttribute('data-view') === 'cards'); });
-        updateCrumb();
-      };
+      Store.selectSession = function (id) { origSelect(id); updateCrumb(); };
       var origClear = Store.clearSession;
       Store.clearSession = function () { origClear(); updateCrumb(); };
     })();
