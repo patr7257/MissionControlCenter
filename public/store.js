@@ -26,6 +26,30 @@
     var sessionsView = views.get('sessions');
     if (sessionsView && typeof sessionsView.sessionsChanged === 'function') sessionsView.sessionsChanged();
   }
+
+  // ---- Attention: surface sessions blocked on the user (needs-permission /
+  // awaiting) even when the window is not focused, via a header pill, the
+  // document title, and the favicon. ----
+  var BASE_TITLE = 'Agent Fleet Monitor';
+  var FAVICON_OK = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='9' fill='%235b9cff'/%3E%3C/svg%3E";
+  var FAVICON_ALERT = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='12' fill='%23ffb43d'/%3E%3Ccircle cx='16' cy='16' r='4.5' fill='%23241a00'/%3E%3C/svg%3E";
+  var attnCount = 0;
+  function updateAttention() {
+    var n = 0;
+    sessions.forEach(function (s) { if (s.status === 'needs-permission' || s.status === 'awaiting') n += 1; });
+    attnCount = n;
+    var pill = document.getElementById('attention');
+    if (pill) {
+      pill.style.display = n > 0 ? '' : 'none';
+      var c = document.getElementById('attCount'); if (c) c.textContent = n;
+    }
+    var fav = document.getElementById('favicon');
+    if (fav) fav.setAttribute('href', n > 0 ? FAVICON_ALERT : FAVICON_OK);
+    // When the window is focused, keep a stable count in the title; the 1s tick
+    // handles the flashing variant while it is hidden.
+    if (n === 0) document.title = BASE_TITLE;
+    else if (!document.hidden) document.title = '(' + n + ') ' + BASE_TITLE;
+  }
   function visibleAgents() {
     if (!selectedSessionId) return Array.from(agents.values());
     var out = [];
@@ -77,7 +101,17 @@
     });
     if (firstSeenAt) { var c = document.getElementById('sClock'); if (c) c.textContent = fmtDur(Date.now() - firstSeenAt); }
     for (var i = 0; i < tickFns.length; i++) { try { tickFns[i](); } catch (e) {} }
+    // Flash the tab title while attention is pending and the window is hidden,
+    // so a blocked session is noticeable from another tab or app.
+    if (attnCount > 0 && document.hidden) {
+      document.title = (document.title.charAt(0) === '(')
+        ? ('● ' + attnCount + ' need input')
+        : ('(' + attnCount + ') ' + BASE_TITLE);
+    }
   }, 1000);
+
+  // Re-settle the title/favicon when the window regains or loses focus.
+  document.addEventListener('visibilitychange', updateAttention);
 
   function connect() {
     var conn = document.getElementById('conn');
@@ -93,12 +127,14 @@
         (msg.sessions || []).forEach(upsertSession);
         var v = active(); if (v) v.reset(snapshot());
         notifySessionsChanged();
+        updateAttention();
       } else if (msg.type === 'agent') {
         upsert(msg.agent);
         var v2 = active(); if (v2) v2.update(msg.agent);
       } else if (msg.type === 'session') {
         upsertSession(msg.session);
         notifySessionsChanged();
+        updateAttention();
       }
     };
   }
