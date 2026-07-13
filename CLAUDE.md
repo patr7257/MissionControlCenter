@@ -166,7 +166,8 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
   Fleet menu offer "Download & install"; accepting downloads the MSI, launches `msiexec /i`, and
   quits so the in-place upgrade is not blocked. The banner button reaches the main process through
   `desktop/preload.cjs` (contextBridge `window.cmcUpdate.install()` -> `ipcMain` `cmc:install-update`).
-  Falls back to the releases page on any gh failure. End-to-end proof needs a published newer tag.
+  Falls back to the releases page on any gh failure. Verified end-to-end on 2026-07-13: an installed
+  0.1.1 showed the banner and self-updated to 0.1.2 via "Download & install" (gh download + msiexec).
 
 ## CI
 `.github/workflows/ci.yml` runs on PRs and pushes to `main` (separate from the release MSI

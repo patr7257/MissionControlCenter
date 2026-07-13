@@ -74,5 +74,6 @@ install", and "Check for updates" in the Fleet menu offers the same on demand. A
 uses `gh release download` to fetch the new MSI, launches it with `msiexec /i`, and quits the
 app so the in-place upgrade is not blocked by locked files (`runAfterFinish` reopens the app
 when the installer finishes). If the download fails (no `gh`, offline, not authed), it falls
-back to opening the releases page for a manual download. This is validated end-to-end only by
-publishing a newer `fleet-v*` release and updating from an older installed build.
+back to opening the releases page for a manual download. Verified end-to-end on 2026-07-13: an
+installed 0.1.1 detected 0.1.2, downloaded it via the banner, ran the installer, and reopened on
+0.1.2.
