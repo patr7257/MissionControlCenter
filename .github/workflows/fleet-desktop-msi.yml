@@ -1,0 +1,55 @@
+name: Fleet desktop MSI
+
+# Builds the Claude Mission Control desktop MSI and attaches it to the release.
+# Trigger: publish a GitHub release whose tag looks like fleet-vX.Y.Z
+# (plain numeric version, MSI ProductVersion does not allow suffixes).
+# workflow_dispatch re-builds and re-uploads for an existing release tag.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing fleet-vX.Y.Z release tag to build and upload to"
+        required: true
+
+jobs:
+  msi:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'fleet-v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: desktop
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set app version from tag
+        run: |
+          $tag = if ('${{ github.event_name }}' -eq 'release') { '${{ github.event.release.tag_name }}' } else { '${{ inputs.tag }}' }
+          if ($tag -notmatch '^fleet-v\d+\.\d+\.\d+$') { Write-Error "Tag '$tag' must look like fleet-vX.Y.Z"; exit 1 }
+          $version = $tag -replace '^fleet-v', ''
+          npm version $version --no-git-tag-version --allow-same-version
+          Add-Content -Path $env:GITHUB_ENV -Value "FLEET_TAG=$tag"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build MSI
+        run: npx electron-builder --win msi --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload MSI to the release
+        run: |
+          $msi = (Get-ChildItem dist/*.msi | Select-Object -First 1).FullName
+          gh release upload $env:FLEET_TAG $msi --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

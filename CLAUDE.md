@@ -159,8 +159,11 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
   pre-existing blocked sessions do not all fire at once). Clicking the toast `POST /focus`es that
   session's terminal and raises the app window. This lives only in the desktop shell; the server
   stays zero-dependency.
-- Releases: publish a GitHub release tagged `fleet-vX.Y.Z` and
+- Releases: publish a GitHub release tagged `fleet-vX.Y.Z` on THIS repo
+  (`patr7257/claude-mission-control`, since the 2026-07-15 monorepo split) and
   `.github/workflows/fleet-desktop-msi.yml` builds and attaches the MSI. See `desktop/README.md`.
+  Installs older than the split check the former monorepo for updates and will not see new
+  releases; upgrade those once by installing a fresh MSI from this repo by hand.
 - Auto-update: `desktop/update-check.mjs` detects a newer `fleet-v*` tag AND downloads its MSI via
   the locally authenticated `gh` CLI (`gh release download`, no baked-in token). The banner and the
   Fleet menu offer "Download & install"; accepting downloads the MSI, launches `msiexec /i`, and
@@ -171,7 +174,7 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
 
 ## CI
 `.github/workflows/ci.yml` runs on PRs and pushes to `main` (separate from the release MSI
-builder). It `node --check`s every `*.mjs` under `claude-mission-control/` and boots the server via
+builder). It `node --check`s every `*.mjs` in the repo and boots the server via
 `scripts/smoke-server.mjs` (hermetic temp HOME, checks `/`, `/repos`, `/stream`, one hook event).
 Zero-dependency, so there is nothing to install. `scripts/smoke-server.mjs` also runs locally:
 `node scripts/smoke-server.mjs`.

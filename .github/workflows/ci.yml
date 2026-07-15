@@ -1,0 +1,39 @@
+name: CI
+
+# Lightweight gate for the mission control app: parse every backend/desktop
+# module and boot the server against its real endpoints. Separate from the
+# release MSI builder (fleet-desktop-msi.yml). Zero runtime deps, so there is
+# nothing to install: just Node.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Syntax check every .mjs
+        run: |
+          $files = Get-ChildItem -Path . -Recurse -Filter *.mjs |
+            Where-Object { $_.FullName -notmatch 'node_modules' }
+          $failed = $false
+          foreach ($f in $files) {
+            node --check $f.FullName
+            if ($LASTEXITCODE -ne 0) { Write-Error "syntax error: $($f.FullName)"; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+          Write-Host "checked $($files.Count) module(s)"
+
+      - name: Server smoke test
+        run: node scripts/smoke-server.mjs

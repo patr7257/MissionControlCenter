@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const REPO = 'przrm/patrick-setup-and-features-improvements';
+const REPO = 'patr7257/claude-mission-control';
 const TAG_PREFIX = 'fleet-v';
 export const RELEASES_URL = `https://github.com/${REPO}/releases`;
 

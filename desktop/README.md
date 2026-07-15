@@ -10,7 +10,7 @@ is left running in the background. (A fresh launch re-installs the hooks and res
 ## Dev loop
 
 ```
-cd C:\Users\pr\repos\patrick-setup-and-features-improvements\claude-mission-control\desktop; npm install; npm start
+cd C:\Users\pr\repos\claude-mission-control\desktop; npm install; npm start
 ```
 
 Dev mode resolves the backend as the parent folder and coexists with `node start.mjs`
@@ -19,7 +19,7 @@ Dev mode resolves the backend as the parent folder and coexists with `node start
 ## Build the MSI locally
 
 ```
-cd C:\Users\pr\repos\patrick-setup-and-features-improvements\claude-mission-control\desktop; npm run dist
+cd C:\Users\pr\repos\claude-mission-control\desktop; npm run dist
 ```
 
 Output: `dist\Claude Mission Control-<version>.msi`. Per-user install (no UAC) into
