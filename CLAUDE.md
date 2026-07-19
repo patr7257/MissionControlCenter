@@ -131,7 +131,7 @@ Still pending (not code-complete):
   including whether the foreground nudge actually raises the window versus just flashing the
   taskbar icon.
 
-Landed 2026-07-19 (PRs #3, #4, #6):
+Landed 2026-07-19 (PRs #3, #4, #6, #8):
 - **Demo mode.** `public/demo.js` (zero-dep) drives the whole UI through a looping scripted fake
   fleet with no server, activated by `?demo=1` (see `public/index.html` boot). `store.js` exposes
   `Store.ingest` (the shared SSE/demo dispatch) for it. Used as the offline showcase and the
@@ -144,6 +144,11 @@ Landed 2026-07-19 (PRs #3, #4, #6):
   bounded-on-safe-reset cap (positional `tabIndex` invariant kept); a subagent-only session derives
   its status from live children instead of sitting on `working` (server.mjs `sawTopLevel`); an empty
   model line is hidden in `view-sessions.js`. Covered by `scripts/smoke-server.mjs`.
+- **Deep repos picker.** `~/repos` was refactored into category folders (1-Personal, 2-ZRM, ...)
+  whose children (and their children) are the real projects. `terminal.listRepos()` now returns
+  `{ root, tree }` (a bounded folder tree, dot-folders and noise dirs like `node_modules` excluded,
+  capped at 5 levels / 4000 nodes), and the New session bar renders one dropdown per level, each
+  defaulting to "Not selected", launching in the deepest folder actually selected (or the root).
 
 ## Desktop app (Electron), the sanctioned exception to zero-dependency
 `desktop/` wraps the unchanged backend in an Electron window and packages it as a Windows MSI.
