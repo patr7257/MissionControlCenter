@@ -232,7 +232,11 @@
     var prompt = s.lastPrompt || s.title || '';
     if (c._prompt !== prompt) { c.prompt.textContent = prompt; c._prompt = prompt; }
     var model = s.model || '';
-    if (c._model !== model) { c.model.textContent = model; c._model = model; }
+    if (c._model !== model) {
+      c.model.textContent = model;
+      c.model.classList.toggle('sc-model-empty', !model);
+      c._model = model;
+    }
     var badgeText = (s.subagentCount && s.subagentCount > 0) ? (s.subagentCount + ' subagent' + (s.subagentCount === 1 ? '' : 's')) : '';
     if (c._badge !== badgeText) {
       c.badge.textContent = badgeText;

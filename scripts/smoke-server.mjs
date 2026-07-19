@@ -89,6 +89,32 @@ try {
   const snap = await readSnapshot();
   check('snapshot has type snapshot', snap && snap.type === 'snapshot');
   check('ingested session appears in snapshot', snap && snap.sessions.some((s) => s.id === 'smoke-1'));
+  const smoke1 = snap && snap.sessions.find((s) => s.id === 'smoke-1');
+  check('no-model SessionStart serializes model as null', smoke1 && smoke1.model === null);
+
+  // Subagent-only session: a session that never gets a top-level hook (no
+  // SessionStart/UserPromptSubmit of its own) must not sit on the 'working'
+  // default forever. SubagentStart is the event server.mjs listens for
+  // (handleEvent's second switch, ~line 495); it carries the subagent's own
+  // agent_id plus the parent session_id, no cwd or model.
+  await fetch(`${BASE}/event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      hook_event_name: 'SubagentStart',
+      session_id: 'smoke-2-parent',
+      agent_id: 'smoke-2-agent',
+      agent_type: 'general-purpose',
+    }),
+  });
+  await sleep(300);
+  const snap2 = await readSnapshot();
+  const subagentOnly = snap2 && snap2.sessions.find((s) => s.id === 'smoke-2-parent');
+  check('subagent-only session appears in snapshot', !!subagentOnly);
+  check(
+    'subagent-only session status is derived (working) from its active child, not left on a stale default',
+    subagentOnly && subagentOnly.status === 'working'
+  );
 
   process.stdout.write(failed ? '\nRESULT: FAIL\n' : '\nRESULT: ALL PASS\n');
   await cleanup(failed ? 1 : 0);
