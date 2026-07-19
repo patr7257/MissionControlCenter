@@ -130,11 +130,20 @@ Still pending (not code-complete):
   serve-and-check; opening/focusing real Windows Terminal tabs must be confirmed by hand,
   including whether the foreground nudge actually raises the window versus just flashing the
   taskbar icon.
-- **Office (Humaaans) visual tuning.** The 2.5D office is a first visual pass; see
-  `docs/office-humaaans-status.md` for the layout knobs to adjust.
-- Known-minor backlog from the final review (all non-blocking): `terminal.mjs` `managedTabs` is
-  unbounded by design (tabIndex is positional); a subagent-only session reads "working" until its
-  first turn-stop; blank model line if a hook omits `model`.
+
+Landed 2026-07-19 (PRs #3, #4, #6):
+- **Demo mode.** `public/demo.js` (zero-dep) drives the whole UI through a looping scripted fake
+  fleet with no server, activated by `?demo=1` (see `public/index.html` boot). `store.js` exposes
+  `Store.ingest` (the shared SSE/demo dispatch) for it. Used as the offline showcase and the
+  visual dev harness. The real SSE path is untouched without the flag.
+- **Cinematic office.** The 2.5D office is no longer a first pass: ambient life (breathing idle,
+  potted plants, wall clock, slow day/night wash), per-tool on-monitor desk FX, a head-of-room
+  orchestrator with glowing connection threads, and a session-complete confetti burst. All vanilla
+  CSS/SVG, gated behind `prefers-reduced-motion`. See `docs/office-humaaans-status.md`.
+- **Known-minor backlog fixed.** `terminal.mjs` `managedTabs` now has a `MAX_MANAGED_TABS`
+  bounded-on-safe-reset cap (positional `tabIndex` invariant kept); a subagent-only session derives
+  its status from live children instead of sitting on `working` (server.mjs `sawTopLevel`); an empty
+  model line is hidden in `view-sessions.js`. Covered by `scripts/smoke-server.mjs`.
 
 ## Desktop app (Electron), the sanctioned exception to zero-dependency
 `desktop/` wraps the unchanged backend in an Electron window and packages it as a Windows MSI.
