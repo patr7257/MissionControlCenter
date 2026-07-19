@@ -70,6 +70,7 @@
   <script src="/view-cards.js"></script>
   <script src="/humaaans.js"></script>
   <script src="/view-office.js"></script>
+  <script src="/demo.js"></script>
   <script>
     (function () {
       // Combined per-session detail view: the professional lanes AND the office
@@ -110,7 +111,10 @@
 
       Store.setActive('sessions');
       updateCrumb();
-      Store.connect();
+      // DEMO ACTIVATION: ?demo in the URL runs the scripted mock-data driver
+      // (public/demo.js) instead of connecting to a real server, so the app
+      // can be shown offline with no session behind it.
+      if (new URLSearchParams(location.search).has('demo')) { Demo.start(); } else { Store.connect(); }
 
       // Refresh the breadcrumb whenever a session is opened or closed.
       var origSelect = Store.selectSession;
