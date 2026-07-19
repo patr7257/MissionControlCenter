@@ -292,6 +292,12 @@ function ensureSession(id, cwd, transcriptPath) {
       live: true,
       source: 'hook',
       transcript: transcriptPath || null,
+      // Internal only, never serialized (see serializeSession): true once this
+      // session has seen a top-level hook (SessionStart/UserPromptSubmit). Until
+      // then its status is derived from its subagents instead of sitting on the
+      // 'working' default forever (a session created only from subagent events
+      // never otherwise gets a hook that would move it off 'working').
+      sawTopLevel: false,
     };
     sessions.set(id, session);
   }
@@ -385,6 +391,27 @@ function ensureAgent(id, type, session) {
   return agent;
 }
 
+// A session with no top-level hook yet (see sawTopLevel) has no Stop/
+// Notification of its own to derive status from, so instead derive it from
+// its subagents: 'working' while any child is active, 'awaiting' otherwise.
+// Returns true if the status changed, so the caller only pushes an update
+// when something actually moved. Sessions that HAVE seen a top-level signal
+// are never touched here; their status stays exactly hook-derived.
+function deriveSubagentOnlyStatus(session) {
+  let anyActive = false;
+  for (const agent of agents.values()) {
+    if (agent.parentSession !== session.id) continue;
+    if (agent.status === 'working' || agent.busy) {
+      anyActive = true;
+      break;
+    }
+  }
+  const next = anyActive ? 'working' : 'awaiting';
+  if (session.status === next) return false;
+  session.status = next;
+  return true;
+}
+
 function handleEvent(payload) {
   const ev = payload && payload.hook_event_name;
   const agentId = payload && payload.agent_id;
@@ -420,6 +447,7 @@ function handleEvent(payload) {
       session.live = true;
       session.source = 'hook';
       session.lastActivityAt = nowMs();
+      session.sawTopLevel = true;
       try {
         terminal.bindSession(session.cwd, sessionId);
       } catch {
@@ -433,6 +461,7 @@ function handleEvent(payload) {
       const session = ensureSession(sessionId, cwd, transcript);
       session.status = 'working';
       session.lastActivityAt = nowMs();
+      session.sawTopLevel = true;
       const promptText = payload.prompt || payload.message;
       if (promptText) session.lastPrompt = truncateLastPrompt(cleanTask(promptText, session.lastPrompt));
       // Bind retry: the SessionStart bind may have missed (server restarted
@@ -538,6 +567,17 @@ function handleEvent(payload) {
       // Stop/Notification/SessionStart/UserPromptSubmit/SessionEnd are handled
       // above, in the session-lifecycle switch.
       break;
+  }
+
+  // Recompute a subagent-only session's status after this event's agent-map
+  // mutations (SubagentStart just created an agent, SubagentStop just marked
+  // one done, etc), rather than before them, so a brand-new subagent-only
+  // session is correctly seen as 'working' on its very first SubagentStart.
+  if (sessionId) {
+    const session = sessions.get(sessionId);
+    if (session && !session.sawTopLevel && deriveSubagentOnlyStatus(session)) {
+      pushSession(session);
+    }
   }
 }
 

@@ -134,6 +134,7 @@
 
 .sc-meta { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--muted); }
 .sc-model { font-variant-numeric: tabular-nums; }
+.sc-model-empty { display: none; }
 .sc-badge {
   margin-left: auto; background: rgba(91,156,255,0.15); color: var(--accent);
   border-radius: 999px; padding: 2px 8px; font-size: 10.5px; font-weight: 650;

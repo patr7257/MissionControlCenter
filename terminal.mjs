@@ -9,6 +9,13 @@ import { spawn, spawnSync } from 'node:child_process';
 
 export const WT_WINDOW = 'cmc';
 
+// Soft cap for managedTabs (see the growth comment below). Once the array
+// crosses this, every push tries the safe reset first (clearStaleManagedTabsIfWindowGone,
+// a no-op while the managed window is still open) and only warns if that did
+// not bring it back under the cap.
+const MAX_MANAGED_TABS = 500;
+let warnedManagedTabsCap = false;
+
 // Persisted alongside the server's other runtime data, outside the repo. Survives a
 // server restart (dev reload, machine reboot) so `tabIndex` (see below) does not
 // desync from the real tab positions in a still-open managed Windows Terminal window,
@@ -41,15 +48,41 @@ function saveManagedTabs() {
 
 // Ordered record of tabs we have opened into the managed window.
 // { sessionId, cwd, title, launchedAt, tabIndex }
-// Deliberately unbounded: `tabIndex` is each entry's position in this array,
-// and it doubles as the literal `wt focus-tab -t <n>` argument, so it must
-// match the real Windows Terminal tab position. Trimming old entries (from
-// the front or anywhere else) would shift the indices of every entry after
-// the trim point and desync them from the actual tabs, breaking focus for
-// existing sessions. This process is restarted often enough (dev server,
+// Deliberately unbounded by design: `tabIndex` is each entry's position in
+// this array, and it doubles as the literal `wt focus-tab -t <n>` argument, so
+// it must match the real Windows Terminal tab position. Trimming old entries
+// (from the front or anywhere else) would shift the indices of every entry
+// after the trim point and desync them from the actual tabs, breaking focus
+// for existing sessions. This process is restarted often enough (dev server,
 // machine restarts) that the array never grows large in practice, so the
 // unbounded growth is acceptable for a session-scoped tool.
+//
+// Bounded-on-safe-reset mitigation: crossing MAX_MANAGED_TABS does not trim
+// the array mid-flight (that would still desync live tab indices), but it
+// does trigger clearStaleManagedTabsIfWindowGone() on the next push, which
+// safely wipes the whole array once zero WindowsTerminal.exe processes exist.
+// The residual: if the managed window somehow stays open indefinitely while
+// producing 500+ tabs without ever closing, the array keeps growing and we
+// only warn once, since trimming it live is unsafe. Accepted as a known-minor
+// backlog item; a genuinely bounded model would need tabIndex to stop being
+// positional, which is out of scope for this mitigation.
 export const managedTabs = loadManagedTabs();
+
+// Called after every push. No-op unless the array just crossed the cap; safe
+// under CMC_DRY_RUN since clearStaleManagedTabsIfWindowGone() already no-ops
+// there (isWtRunning() always reports "running" under CMC_DRY_RUN).
+function enforceManagedTabsCap() {
+  if (managedTabs.length <= MAX_MANAGED_TABS) return;
+  clearStaleManagedTabsIfWindowGone();
+  if (managedTabs.length > MAX_MANAGED_TABS && !warnedManagedTabsCap) {
+    warnedManagedTabsCap = true;
+    console.warn(
+      `managedTabs has ${managedTabs.length} entries, over the ${MAX_MANAGED_TABS} soft cap, ` +
+      'and the managed Windows Terminal window is still open, so it cannot be safely reset. ' +
+      'Not trimming mid-array (tabIndex is positional); this will only warn once.'
+    );
+  }
+}
 
 // Gates only the eager bind-on-hook path (bindSession, the SessionStart/
 // UserPromptSubmit fast path): a cold `wt` window plus `claude` startup can
@@ -197,12 +230,14 @@ export function launchSession(repoPath, title) {
 
     if (process.env.CMC_DRY_RUN) {
       managedTabs.push({ sessionId: null, cwd: repoPath, title, launchedAt: Date.now(), tabIndex });
+      enforceManagedTabsCap();
       return { ok: true, command, dryRun: true };
     }
 
     spawnWt(args);
     managedTabs.push({ sessionId: null, cwd: repoPath, title, launchedAt: Date.now(), tabIndex });
     saveManagedTabs();
+    enforceManagedTabsCap();
     return { ok: true, command };
   } catch (error) {
     return { ok: false, error: String(error) };
@@ -289,12 +324,14 @@ export function reopenSession(sessionId, cwd) {
 
     if (process.env.CMC_DRY_RUN) {
       managedTabs.push(entry);
+      enforceManagedTabsCap();
       return { ok: true, mode: 'reattached', command, dryRun: true };
     }
 
     spawnWt(args);
     managedTabs.push(entry);
     saveManagedTabs();
+    enforceManagedTabsCap();
     bringToForeground(title);
     return { ok: true, mode: 'reattached', command };
   } catch (error) {
