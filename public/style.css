@@ -285,6 +285,152 @@
 @keyframes simjump { 0%,100%{ transform: translateY(0);} 35%{ transform: translateY(-16px);} 65%{ transform: translateY(-5px);} }
 
 /* ============================================================
+   Office cinematic (issue #5): ambient life, per-tool desk FX,
+   orchestrator + connection threads, confetti. Appended after the
+   base office-motion block so these override .sim.idle / .sim.busy
+   by source order. Every looping/ambient animation here is disabled
+   in the prefers-reduced-motion block at the end of this file.
+   ============================================================ */
+
+/* Taller 2.5D stage (set to match ROOM_H in view-office.js). */
+.room { height: 640px; }
+
+/* Slow day/night light wash: a gentle warm-to-cool overlay on a long cycle.
+   soft-light keeps it subtle so bubbles and labels stay readable. */
+.room .daynight {
+  position: absolute; inset: 0; z-index: 1; pointer-events: none; mix-blend-mode: soft-light;
+  background: linear-gradient(155deg, rgba(255,206,140,0.7), rgba(150,190,255,0) 52%, rgba(120,150,255,0.55));
+  animation: dayNight 64s ease-in-out infinite;
+}
+@keyframes dayNight {
+  0%, 100% { opacity: 0.32; filter: hue-rotate(0deg); }
+  50% { opacity: 0.6; filter: hue-rotate(-16deg); }
+}
+
+/* Decorative props behind the characters (potted plants + wall clock). */
+.prop { position: absolute; z-index: 1; pointer-events: none; }
+.prop.plant { width: 54px; }
+.prop.plant svg, .prop.clock svg { display: block; width: 100%; height: auto; overflow: visible; }
+.prop.clock { width: 46px; }
+.prop .plant-leaf { transform-origin: 27px 46px; animation: plantSway 6.5s ease-in-out infinite; }
+@keyframes plantSway { 0%, 100% { transform: rotate(-2.2deg); } 50% { transform: rotate(2.2deg); } }
+.prop .clock-hand { transform-origin: 23px 23px; }
+.prop .clock-hand.mh { animation: clockSweep 12s linear infinite; }
+.prop .clock-hand.hh { animation: clockSweep 144s linear infinite; }
+@keyframes clockSweep { to { transform: rotate(360deg); } }
+
+/* Ambient idle: gentle breathing + a slow sway with a subtle coffee-sip beat,
+   replacing the old flat rotate so idle characters feel alive. */
+.sim.idle .char { animation: simIdleSway 6.2s ease-in-out infinite; }
+.sim.idle .char svg { transform-origin: center bottom; animation: simBreathe 4.4s ease-in-out infinite; }
+@keyframes simIdleSway {
+  0%, 100% { transform: rotate(0) translateY(0); }
+  18% { transform: rotate(-1.3deg) translateY(0); }
+  46% { transform: rotate(0) translateY(1px); }
+  70% { transform: rotate(1deg) translateY(-1px); }
+  80% { transform: rotate(0.5deg) translateY(-3px); }
+  90% { transform: rotate(0) translateY(0); }
+}
+@keyframes simBreathe { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(1.016); } }
+
+/* ---- Per-tool on-monitor desk FX. The .scr layer lives inside the monitor
+   and is clipped to the screen; the whole desk flashes red on an error. ---- */
+.deskfront .monitor { z-index: 5; }
+.deskfront .monitor .scr {
+  position: absolute; inset: 3px; border-radius: 2px; overflow: hidden; background: #101a2e;
+}
+
+/* code-rain / typing (Bash, Edit, Write, NotebookEdit) */
+.deskfront[data-fx="code"] .scr { background: #0c1810; }
+.deskfront[data-fx="code"] .scr::before,
+.deskfront[data-fx="code"] .scr::after {
+  content: ''; position: absolute; left: 0; right: 0; top: -100%; height: 200%;
+  background: repeating-linear-gradient(0deg, rgba(61,220,132,0.85) 0 2px, transparent 2px 7px);
+  animation: fxCode 0.85s linear infinite;
+}
+.deskfront[data-fx="code"] .scr::after { left: 50%; animation-duration: 1.2s; opacity: 0.55; }
+@keyframes fxCode { from { transform: translateY(0); } to { transform: translateY(50%); } }
+
+/* magnifier sweep (Grep, Glob) */
+.deskfront[data-fx="scan"] .scr { background: #12213a; }
+.deskfront[data-fx="scan"] .scr::before {
+  content: ''; position: absolute; top: 50%; left: 0; width: 13px; height: 13px; margin-top: -7px;
+  border: 2px solid #ffd36b; border-radius: 50%; box-shadow: 0 0 6px rgba(255,211,107,0.85);
+  animation: fxScan 1.4s ease-in-out infinite;
+}
+@keyframes fxScan { 0%, 100% { transform: translateX(2px); } 50% { transform: translateX(28px); } }
+
+/* page-flip (Read) */
+.deskfront[data-fx="page"] .scr { background: #eef2f8; perspective: 130px; }
+.deskfront[data-fx="page"] .scr::after {
+  content: ''; position: absolute; left: 4px; right: 4px; top: 5px; height: 2px;
+  background: rgba(43,51,70,0.35);
+  box-shadow: 0 4px 0 rgba(43,51,70,0.28), 0 8px 0 rgba(43,51,70,0.22), 0 12px 0 rgba(43,51,70,0.16);
+}
+.deskfront[data-fx="page"] .scr::before {
+  content: ''; position: absolute; inset: 0; background: linear-gradient(#ffffff, #dfe6f2);
+  transform-origin: left center; animation: fxPage 1.35s ease-in-out infinite;
+}
+@keyframes fxPage { 0%, 100% { transform: rotateY(0); } 50% { transform: rotateY(-72deg); } }
+
+/* globe / network pulse (WebFetch, WebSearch) */
+.deskfront[data-fx="globe"] .scr { background: radial-gradient(circle at 50% 50%, #12385f, #0a1830); }
+.deskfront[data-fx="globe"] .scr::before {
+  content: ''; position: absolute; inset: 0; margin: auto; width: 6px; height: 6px; border-radius: 50%;
+  background: #5b9cff; box-shadow: 0 0 8px #5b9cff; animation: fxGlobe 1.5s ease-out infinite;
+}
+@keyframes fxGlobe { 0% { box-shadow: 0 0 0 0 rgba(91,156,255,0.7); } 100% { box-shadow: 0 0 0 20px rgba(91,156,255,0); } }
+
+/* default thinking scanline (any other active tool) */
+.deskfront[data-fx="think"] .scr::before {
+  content: ''; position: absolute; left: 0; right: 0; top: 0; height: 3px;
+  background: rgba(91,156,255,0.65); animation: fxThink 1.9s linear infinite;
+}
+@keyframes fxThink { 0% { top: 0; opacity: 0; } 20% { opacity: 1; } 100% { top: 100%; opacity: 0; } }
+
+/* error: red desk-lamp flash / alert glow at that desk */
+.deskfront[data-alert] { animation: deskAlert 0.85s ease-in-out infinite; }
+.deskfront[data-alert] .monitor { border-color: var(--error); }
+.deskfront[data-alert] .scr { background: #2a0e12; }
+@keyframes deskAlert {
+  0%, 100% { box-shadow: 0 10px 18px rgba(0,0,0,0.14); }
+  50% { box-shadow: 0 10px 18px rgba(0,0,0,0.14), 0 -4px 30px 6px rgba(255,93,108,0.6); }
+}
+.sim.error .bubble .err-badge { color: var(--error); font-weight: 650; }
+
+/* ---- Orchestrator: a distinct head-of-room presence with a small crown. ---- */
+.sim.orch { z-index: 4; width: 124px; }
+.sim.orch .char { width: 124px; transform-origin: center bottom; animation: orchSway 5.6s ease-in-out infinite; }
+.sim.orch .crown { position: absolute; left: 50%; top: -2px; transform: translateX(-50%); width: 32px; z-index: 9; }
+.sim.orch .crown svg { display: block; width: 100%; height: auto; overflow: visible; filter: drop-shadow(0 2px 4px rgba(224,165,46,0.5)); }
+.sim.orch .label .nm { color: #8a6a1a; font-weight: 700; letter-spacing: 0.3px; }
+.orch-desk { width: 190px; background: linear-gradient(#cbd3e6, #9aa6c0); }
+@keyframes orchSway { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(-1deg); } }
+
+/* ---- Connection threads: glowing curved links, behind characters (z 2),
+   above the floor (z 1) and desks paint over them (z 5). ---- */
+.room .threads { position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: visible; }
+.room .threads .thread {
+  fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-linecap: round;
+  stroke-dasharray: 5 7; opacity: 0.8;
+  filter: drop-shadow(0 0 4px rgba(91,156,255,0.85));
+  animation: threadFlow 1.1s linear infinite, threadPulse 2.4s ease-in-out infinite;
+}
+@keyframes threadFlow { to { stroke-dashoffset: -24; } }
+@keyframes threadPulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 0.95; } }
+
+/* ---- Confetti burst (whole session done). Layered on top, self-cleaning. ---- */
+.confetti-layer { position: absolute; inset: 0; z-index: 30; pointer-events: none; overflow: hidden; }
+.confetti-layer i {
+  position: absolute; top: -14px; width: 8px; height: 12px; border-radius: 2px; opacity: 0;
+  animation: confettiFall 1.5s ease-in forwards;
+}
+@keyframes confettiFall {
+  0% { transform: translate(0, 0) rotate(0); opacity: 1; }
+  100% { transform: translate(var(--dx), var(--dy)) rotate(var(--rot)); opacity: 0; }
+}
+
+/* ============================================================
    Modern polish + attention states (zero-dep, plain CSS).
    Appended last so these refinements win by source order.
    ============================================================ */
@@ -380,7 +526,9 @@ header h1 .dot { filter: drop-shadow(0 0 6px var(--accent)); }
   50% { box-shadow: 0 6px 26px rgba(91,156,255,0.6), 0 0 0 1px rgba(255,255,255,0.25) inset; }
 }
 
-/* Respect reduced-motion: keep the app calm for users who ask for it. */
+/* Respect reduced-motion: keep the app calm for users who ask for it. This
+   also stills the whole office (day/night wash, props, idle breathing, desk
+   FX, orchestrator sway, threads, confetti) so it becomes a calm static scene. */
 @media (prefers-reduced-motion: reduce) {
   .attention,
   .session-card.status-needs-permission,
@@ -389,6 +537,23 @@ header h1 .dot { filter: drop-shadow(0 0 6px var(--accent)); }
   .card.busy::before,
   .card.status-error,
   .session-card.focusing,
-  .demo-ribbon { animation: none !important; }
+  .demo-ribbon,
+  .room .daynight,
+  .prop .plant-leaf,
+  .prop .clock-hand,
+  .prop .clock-hand.mh,
+  .prop .clock-hand.hh,
+  .sim.busy .char,
+  .sim.idle .char,
+  .sim.idle .char svg,
+  .sim.walking .char,
+  .sim.orch .char,
+  .sim[data-act="reading"].busy .char,
+  .sim[data-act="typing"].busy .char,
+  .deskfront[data-fx] .scr::before,
+  .deskfront[data-fx] .scr::after,
+  .deskfront[data-alert],
+  .room .threads .thread,
+  .confetti-layer i { animation: none !important; }
   * { transition-duration: 0.01ms !important; }
 }
