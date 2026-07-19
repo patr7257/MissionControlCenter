@@ -113,6 +113,31 @@
   // Re-settle the title/favicon when the window regains or loses focus.
   document.addEventListener('visibilitychange', updateAttention);
 
+  // Handles one already-parsed message in the exact shape the SSE stream sends:
+  // { type:'snapshot', firstSeenAt, agents:[...], sessions:[...] },
+  // { type:'agent', agent:{...} }, or { type:'session', session:{...} }.
+  // Shared by the live SSE path (connect()) and by Store.ingest (used by the
+  // in-browser demo driver), so both go through identical dispatch logic.
+  function handleMessage(msg) {
+    if (!msg) return;
+    if (msg.type === 'snapshot') {
+      agents.clear(); sessions.clear();
+      firstSeenAt = msg.firstSeenAt || null; Store.firstSeenAt = firstSeenAt;
+      (msg.agents || []).forEach(upsert);
+      (msg.sessions || []).forEach(upsertSession);
+      var v = active(); if (v) v.reset(snapshot());
+      notifySessionsChanged();
+      updateAttention();
+    } else if (msg.type === 'agent') {
+      upsert(msg.agent);
+      var v2 = active(); if (v2) v2.update(msg.agent);
+    } else if (msg.type === 'session') {
+      upsertSession(msg.session);
+      notifySessionsChanged();
+      updateAttention();
+    }
+  }
+
   function connect() {
     var conn = document.getElementById('conn');
     var src = new EventSource('/stream');
@@ -120,22 +145,7 @@
     src.onerror = function () { conn.classList.remove('live'); document.getElementById('connText').textContent = 'reconnecting'; };
     src.onmessage = function (e) {
       var msg; try { msg = JSON.parse(e.data); } catch (err) { return; }
-      if (msg.type === 'snapshot') {
-        agents.clear(); sessions.clear();
-        firstSeenAt = msg.firstSeenAt || null; Store.firstSeenAt = firstSeenAt;
-        (msg.agents || []).forEach(upsert);
-        (msg.sessions || []).forEach(upsertSession);
-        var v = active(); if (v) v.reset(snapshot());
-        notifySessionsChanged();
-        updateAttention();
-      } else if (msg.type === 'agent') {
-        upsert(msg.agent);
-        var v2 = active(); if (v2) v2.update(msg.agent);
-      } else if (msg.type === 'session') {
-        upsertSession(msg.session);
-        notifySessionsChanged();
-        updateAttention();
-      }
+      handleMessage(msg);
     };
   }
 
@@ -150,7 +160,7 @@
     agents: agents, sessions: sessions, firstSeenAt: firstSeenAt,
     get selectedSessionId() { return selectedSessionId; },
     registerView: registerView, setActive: setActive, getActiveId: getActiveId,
-    snapshot: snapshot, onTick: onTick, connect: connect,
+    snapshot: snapshot, onTick: onTick, connect: connect, ingest: handleMessage,
     visibleAgents: visibleAgents, visibleAgentIds: visibleAgentIds,
     selectSession: selectSession, clearSession: clearSession,
     fmt: { dur: fmtDur, tokens: fmtTokens, esc: esc, shortId: shortId, hash: hashStr }

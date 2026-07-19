@@ -362,6 +362,23 @@ header h1 .dot { filter: drop-shadow(0 0 6px var(--accent)); }
   50% { box-shadow: 0 0 16px 1px rgba(255,93,108,0.4); }
 }
 
+/* ---- Demo mode ribbon (fixed corner chip, shown only when ?demo is active;
+   see public/demo.js). Bottom-left so it never collides with the header
+   stats (top) or the toast (bottom-right). ---- */
+.demo-ribbon {
+  position: fixed; left: 18px; bottom: 18px; z-index: 200;
+  background: linear-gradient(135deg, var(--accent), #9b8cff);
+  color: #0d1018; font-weight: 800; font-size: 11px; letter-spacing: 1.2px;
+  padding: 6px 13px; border-radius: 999px;
+  box-shadow: 0 6px 18px rgba(91,156,255,0.35), 0 0 0 1px rgba(255,255,255,0.15) inset;
+  pointer-events: none; user-select: none;
+  animation: demoPulse 2.4s ease-in-out infinite;
+}
+@keyframes demoPulse {
+  0%, 100% { box-shadow: 0 6px 18px rgba(91,156,255,0.35), 0 0 0 1px rgba(255,255,255,0.15) inset; }
+  50% { box-shadow: 0 6px 26px rgba(91,156,255,0.6), 0 0 0 1px rgba(255,255,255,0.25) inset; }
+}
+
 /* Respect reduced-motion: keep the app calm for users who ask for it. */
 @media (prefers-reduced-motion: reduce) {
   .attention,
@@ -370,6 +387,7 @@ header h1 .dot { filter: drop-shadow(0 0 6px var(--accent)); }
   .session-card.status-working::before,
   .card.busy::before,
   .card.status-error,
-  .session-card.focusing { animation: none !important; }
+  .session-card.focusing,
+  .demo-ribbon { animation: none !important; }
   * { transition-duration: 0.01ms !important; }
 }
