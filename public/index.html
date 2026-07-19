@@ -31,9 +31,8 @@
 
   <div id="viewSessions" class="view active">
     <div class="new-session-bar" id="newSessionBar">
-      <label for="newSessionCategory" class="ns-label">Repos:</label>
-      <select id="newSessionCategory" class="ns-select"><option value="">Loading...</option></select>
-      <select id="newSessionRepo" class="ns-select"><option value="">Loading repos...</option></select>
+      <label class="ns-label">Repos:</label>
+      <span id="newSessionSelectors" class="ns-selectors"><select class="ns-select" disabled><option>Loading...</option></select></span>
       <button id="newSessionBtn" class="ns-btn" type="button">New session</button>
       <span class="ns-feedback" id="newSessionFeedback"></span>
     </div>

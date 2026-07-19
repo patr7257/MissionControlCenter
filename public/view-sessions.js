@@ -276,51 +276,80 @@
     }
   }
 
-  // Cascading New session picker: a category dropdown (the folders directly under
-  // ~/repos, e.g. 1-Personal) drives a project dropdown (the repos inside that
-  // category). /repos returns a flat list where each entry carries its `category`.
-  var reposByCategory = {};
+  // Cascading New session picker. /repos returns { root, tree } where tree is a
+  // bounded folder tree; each dropdown lists one folder level. Choosing a folder that
+  // has subfolders spawns the next dropdown (up to MAX_SELECTORS), each defaulting to
+  // "Not selected". New session launches in the deepest folder actually selected, or
+  // the repos root if nothing is selected.
+  var MAX_SELECTORS = 5;
+  var repoRoot = '';
+  var repoTree = [];
   function oneOption(value, text) { var o = document.createElement('option'); o.value = value; o.textContent = text; return o; }
-  function fillProjects(category) {
-    var repoSel = document.getElementById('newSessionRepo');
-    if (!repoSel) return;
-    repoSel.innerHTML = '';
-    var list = reposByCategory[category] || [];
-    if (!list.length) { repoSel.appendChild(oneOption('', 'No projects')); return; }
-    list.forEach(function (r) { repoSel.appendChild(oneOption(r.path, r.name)); });
+  function baseName(p) {
+    var s = String(p || '').replace(/[\\/]+$/, '');
+    var i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    return i >= 0 ? s.slice(i + 1) : s;
+  }
+  function selectorsEl() { return document.getElementById('newSessionSelectors'); }
+
+  function makeSelect(nodes) {
+    var sel = document.createElement('select');
+    sel.className = 'ns-select';
+    sel.appendChild(oneOption('', 'Not selected'));
+    nodes.forEach(function (n) { sel.appendChild(oneOption(n.path, n.name)); });
+    sel._nodes = nodes;
+    sel.addEventListener('change', function () { onSelectorChange(sel); });
+    return sel;
+  }
+  function onSelectorChange(sel) {
+    var host = selectorsEl();
+    if (!host) return;
+    // Drop every dropdown to the right of the one that changed.
+    while (sel.nextSibling) host.removeChild(sel.nextSibling);
+    var node = sel.selectedIndex > 0 ? sel._nodes[sel.selectedIndex - 1] : null;
+    if (node && node.children && node.children.length && host.children.length < MAX_SELECTORS) {
+      host.appendChild(makeSelect(node.children));
+    }
+  }
+  function renderSelectors() {
+    var host = selectorsEl();
+    if (!host) return;
+    host.innerHTML = '';
+    if (!repoTree.length) {
+      var s = document.createElement('select'); s.className = 'ns-select'; s.disabled = true;
+      s.appendChild(oneOption('', 'No repos found'));
+      host.appendChild(s);
+      return;
+    }
+    host.appendChild(makeSelect(repoTree));
   }
   function loadRepos() {
-    var catSel = document.getElementById('newSessionCategory');
-    var repoSel = document.getElementById('newSessionRepo');
-    if (!catSel || !repoSel) return;
-    fetch('/repos').then(function (res) { return res.json(); }).then(function (repos) {
-      reposByCategory = {};
-      (repos || []).forEach(function (r) {
-        var c = r.category || '(root)';
-        (reposByCategory[c] = reposByCategory[c] || []).push(r);
-      });
-      var cats = Object.keys(reposByCategory).sort();
-      catSel.innerHTML = '';
-      if (!cats.length) {
-        catSel.appendChild(oneOption('', 'No repos found'));
-        repoSel.innerHTML = ''; repoSel.appendChild(oneOption('', 'No repos found'));
-        return;
-      }
-      cats.forEach(function (c) { catSel.appendChild(oneOption(c, c)); });
-      fillProjects(cats[0]);
+    if (!selectorsEl()) return;
+    fetch('/repos').then(function (res) { return res.json(); }).then(function (data) {
+      repoRoot = (data && data.root) || '';
+      repoTree = (data && data.tree) || [];
+      renderSelectors();
     }).catch(function () {
-      catSel.innerHTML = ''; catSel.appendChild(oneOption('', 'Failed to load repos'));
-      repoSel.innerHTML = ''; repoSel.appendChild(oneOption('', 'Failed to load repos'));
+      var host = selectorsEl();
+      if (host) { host.innerHTML = ''; var s = document.createElement('select'); s.className = 'ns-select'; s.disabled = true; s.appendChild(oneOption('', 'Failed to load repos')); host.appendChild(s); }
     });
   }
 
+  // The launch folder is the deepest dropdown with a real selection, or the root.
+  function currentLaunchPath() {
+    var host = selectorsEl();
+    if (!host) return repoRoot;
+    var path = repoRoot;
+    for (var i = 0; i < host.children.length; i++) { if (host.children[i].value) path = host.children[i].value; }
+    return path;
+  }
+
   function launchSession() {
-    var select = document.getElementById('newSessionRepo');
     var btn = document.getElementById('newSessionBtn');
     var feedback = document.getElementById('newSessionFeedback');
-    if (!select || !select.value) return;
-    var repoPath = select.value;
-    var repoName = select.options[select.selectedIndex] ? select.options[select.selectedIndex].textContent : repoPath;
+    var repoPath = currentLaunchPath();
+    if (!repoPath) return;
+    var repoName = baseName(repoPath);
     btn.disabled = true;
     if (feedback) feedback.textContent = 'Launching ' + repoName + '...';
     fetch('/launch', {
@@ -343,8 +372,6 @@
     if (!btn || btn._wired) return;
     btn._wired = true;
     btn.addEventListener('click', launchSession);
-    var catSel = document.getElementById('newSessionCategory');
-    if (catSel) catSel.addEventListener('change', function () { fillProjects(catSel.value); });
   }
 
   function tick() {

@@ -78,7 +78,8 @@ try {
 
   const repos = await fetch(`${BASE}/repos`);
   check('GET /repos returns 200', repos.status === 200);
-  check('GET /repos returns an array', Array.isArray(await repos.json()));
+  const reposBody = await repos.json();
+  check('GET /repos returns a { root, tree } folder tree', reposBody && typeof reposBody.root === 'string' && Array.isArray(reposBody.tree));
 
   await fetch(`${BASE}/event`, {
     method: 'POST',

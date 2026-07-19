@@ -202,42 +202,49 @@ function bringToForeground(title) {
   }
 }
 
-// Lists launchable repos under ~/repos, one category level deep. The repos folder
-// now holds category folders (1-Personal, 2-ZRM, ...) whose children are the real
-// projects, so each returned repo carries the `category` it lives under (used by the
-// New session picker's cascading category -> project dropdowns). A top-level folder
-// that is itself a git repo is still listed directly, under the '(root)' category, so
-// a flat repos layout keeps working.
+// The New session picker cascades folder by folder from ~/repos: the repos folder
+// was refactored into category folders (1-Personal, 2-ZRM, ...) whose children are
+// projects, and some of those (customers, INTERN PROJECTS, ...) nest further. So
+// this returns a bounded folder tree the picker walks with one dropdown per level.
+const REPO_TREE_MAX_DEPTH = 5;            // matches the picker's 5-selector cap
+const REPO_TREE_MAX_NODES = 4000;         // backstop against a pathological scan
+// Noise folders that are never a useful place to start a session; skipped (with
+// all dot-folders) so the cascade stays project-shaped, not source-tree-shaped.
+const REPO_TREE_SKIP = new Set([
+  'node_modules', 'dist', 'build', 'out', 'target', 'bin', 'obj', 'vendor',
+  'coverage', '__pycache__', 'venv', '.venv', '.git', '.next', '.nuxt', '.idea', '.vscode',
+]);
+
+// Returns { root, tree } where root is the repos dir and tree is an array of nodes
+// { name, path, children }. children is [] at the depth cap or when a folder has no
+// (non-skipped) subfolders, which is how the picker knows to stop cascading.
 export function listRepos() {
-  const ROOT_CATEGORY = '(root)';
-  try {
-    const reposDir = path.join(os.homedir(), 'repos');
-    const top = fs.readdirSync(reposDir, { withFileTypes: true });
-    const repos = [];
-    for (const entry of top) {
-      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
-      const entryPath = path.join(reposDir, entry.name);
-      // A top-level folder that is itself a repo is listed as-is (flat layout).
-      if (fs.existsSync(path.join(entryPath, '.git'))) {
-        repos.push({ name: entry.name, path: entryPath, category: ROOT_CATEGORY });
-        continue;
-      }
-      // Otherwise treat it as a category and list its child projects.
-      let children;
-      try {
-        children = fs.readdirSync(entryPath, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const child of children) {
-        if (!child.isDirectory() || child.name.startsWith('.')) continue;
-        repos.push({ name: child.name, path: path.join(entryPath, child.name), category: entry.name });
-      }
+  const reposDir = path.join(os.homedir(), 'repos');
+  const counter = { n: 0 };
+  function buildTree(dir, level) {
+    if (level > REPO_TREE_MAX_DEPTH || counter.n >= REPO_TREE_MAX_NODES) return [];
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return [];
     }
-    repos.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
-    return repos;
+    const nodes = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      if (REPO_TREE_SKIP.has(entry.name)) continue;
+      if (counter.n >= REPO_TREE_MAX_NODES) break;
+      counter.n += 1;
+      const full = path.join(dir, entry.name);
+      nodes.push({ name: entry.name, path: full, children: buildTree(full, level + 1) });
+    }
+    nodes.sort((a, b) => a.name.localeCompare(b.name));
+    return nodes;
+  }
+  try {
+    return { root: reposDir, tree: buildTree(reposDir, 1) };
   } catch {
-    return [];
+    return { root: reposDir, tree: [] };
   }
 }
 
