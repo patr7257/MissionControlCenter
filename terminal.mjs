@@ -202,17 +202,39 @@ function bringToForeground(title) {
   }
 }
 
+// Lists launchable repos under ~/repos, one category level deep. The repos folder
+// now holds category folders (1-Personal, 2-ZRM, ...) whose children are the real
+// projects, so each returned repo carries the `category` it lives under (used by the
+// New session picker's cascading category -> project dropdowns). A top-level folder
+// that is itself a git repo is still listed directly, under the '(root)' category, so
+// a flat repos layout keeps working.
 export function listRepos() {
+  const ROOT_CATEGORY = '(root)';
   try {
     const reposDir = path.join(os.homedir(), 'repos');
-    const entries = fs.readdirSync(reposDir, { withFileTypes: true });
+    const top = fs.readdirSync(reposDir, { withFileTypes: true });
     const repos = [];
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name.startsWith('.')) continue;
-      repos.push({ name: entry.name, path: path.join(reposDir, entry.name) });
+    for (const entry of top) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const entryPath = path.join(reposDir, entry.name);
+      // A top-level folder that is itself a repo is listed as-is (flat layout).
+      if (fs.existsSync(path.join(entryPath, '.git'))) {
+        repos.push({ name: entry.name, path: entryPath, category: ROOT_CATEGORY });
+        continue;
+      }
+      // Otherwise treat it as a category and list its child projects.
+      let children;
+      try {
+        children = fs.readdirSync(entryPath, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const child of children) {
+        if (!child.isDirectory() || child.name.startsWith('.')) continue;
+        repos.push({ name: child.name, path: path.join(entryPath, child.name), category: entry.name });
+      }
     }
-    repos.sort((a, b) => a.name.localeCompare(b.name));
+    repos.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
     return repos;
   } catch {
     return [];

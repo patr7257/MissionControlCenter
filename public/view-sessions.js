@@ -276,30 +276,41 @@
     }
   }
 
+  // Cascading New session picker: a category dropdown (the folders directly under
+  // ~/repos, e.g. 1-Personal) drives a project dropdown (the repos inside that
+  // category). /repos returns a flat list where each entry carries its `category`.
+  var reposByCategory = {};
+  function oneOption(value, text) { var o = document.createElement('option'); o.value = value; o.textContent = text; return o; }
+  function fillProjects(category) {
+    var repoSel = document.getElementById('newSessionRepo');
+    if (!repoSel) return;
+    repoSel.innerHTML = '';
+    var list = reposByCategory[category] || [];
+    if (!list.length) { repoSel.appendChild(oneOption('', 'No projects')); return; }
+    list.forEach(function (r) { repoSel.appendChild(oneOption(r.path, r.name)); });
+  }
   function loadRepos() {
-    var select = document.getElementById('newSessionRepo');
-    if (!select) return;
+    var catSel = document.getElementById('newSessionCategory');
+    var repoSel = document.getElementById('newSessionRepo');
+    if (!catSel || !repoSel) return;
     fetch('/repos').then(function (res) { return res.json(); }).then(function (repos) {
-      select.innerHTML = '';
-      if (!repos || !repos.length) {
-        var opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = 'No repos found';
-        select.appendChild(opt);
+      reposByCategory = {};
+      (repos || []).forEach(function (r) {
+        var c = r.category || '(root)';
+        (reposByCategory[c] = reposByCategory[c] || []).push(r);
+      });
+      var cats = Object.keys(reposByCategory).sort();
+      catSel.innerHTML = '';
+      if (!cats.length) {
+        catSel.appendChild(oneOption('', 'No repos found'));
+        repoSel.innerHTML = ''; repoSel.appendChild(oneOption('', 'No repos found'));
         return;
       }
-      repos.forEach(function (r) {
-        var opt = document.createElement('option');
-        opt.value = r.path;
-        opt.textContent = r.name;
-        select.appendChild(opt);
-      });
+      cats.forEach(function (c) { catSel.appendChild(oneOption(c, c)); });
+      fillProjects(cats[0]);
     }).catch(function () {
-      select.innerHTML = '';
-      var opt = document.createElement('option');
-      opt.value = '';
-      opt.textContent = 'Failed to load repos';
-      select.appendChild(opt);
+      catSel.innerHTML = ''; catSel.appendChild(oneOption('', 'Failed to load repos'));
+      repoSel.innerHTML = ''; repoSel.appendChild(oneOption('', 'Failed to load repos'));
     });
   }
 
@@ -332,6 +343,8 @@
     if (!btn || btn._wired) return;
     btn._wired = true;
     btn.addEventListener('click', launchSession);
+    var catSel = document.getElementById('newSessionCategory');
+    if (catSel) catSel.addEventListener('change', function () { fillProjects(catSel.value); });
   }
 
   function tick() {
