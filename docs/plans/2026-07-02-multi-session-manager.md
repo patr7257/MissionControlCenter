@@ -18,7 +18,7 @@ Terminal tabs with click-to-jump. That gap is the target.
 - The dashboard launches sessions into a managed Windows Terminal window (`wt -w cmc ...`) so it
   can focus the exact tab; externally-launched sessions still show and reattach via
   `claude --resume <id>`.
-- Repo `claude-mission-control` (private, przrm), MIT + Humaaans CC-BY NOTICE. (Done in Phase 1.)
+- Repo `MissionControlCenter` (private, patr7257), MIT + Humaaans CC-BY NOTICE. (Done in Phase 1.)
 
 ## Phase 2 - Discovery + Sessions overview (read-only, do first)
 - `install-hooks.mjs`: add user-level `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`,

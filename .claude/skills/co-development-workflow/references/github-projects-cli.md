@@ -280,7 +280,7 @@ git worktree remove ../MW_service_tool-<ISSUE_NUMBER>
 Discovered 15 Jul 2026 when the board was created (re-run sections 2 and 3 if the
 board changes):
 
-- Repo (issues live here): `patr7257/claude-mission-control`
+- Repo (issues live here): `patr7257/MissionControlCenter`
 - Integration branch: `main` (no `dev`; this repo's convention is feature branches
   based on `origin/main` that PR into `main`, overriding the generic
   never-branch-onto-main rule; still never COMMIT or push to `main` directly)

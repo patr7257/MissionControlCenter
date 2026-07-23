@@ -2,6 +2,9 @@
 # The MSI upgradeCode below must NEVER change: Windows uses it to recognise the
 # product across versions so a newer MSI upgrades in place instead of installing
 # a second copy.
+# appId keeps the original claude-mission-control slug on purpose: together with
+# upgradeCode it is the MSI upgrade identity, so changing it would break in-place
+# upgrades for already-installed apps. It is not user-visible.
 appId: dk.zrm.claude-mission-control
 productName: Mission Control Center
 directories:

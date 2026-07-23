@@ -20,7 +20,7 @@ Not started (from the original plan / asks):
 - Demo confetti beat (the demo loop ends on an error, so all-done confetti never fires).
 
 ## Prioritized next steps
-1. patrickrobelweb web embed (board #2): new `website/scripts/sync-mission-control.mjs` mirroring `sync-minigames.mjs`, copying `public/**` into `website/public/mission-control-demo/`, then iframe `/mission-control-demo/index.html?demo=1` on the `portfolio/claude-mission-control` page. Decide public vs the existing password gate.
+1. PatrickRobelWeb web embed (board #2): new `website/scripts/sync-mission-control.mjs` mirroring `sync-minigames.mjs`, copying `public/**` into `website/public/mission-control-demo/`, then iframe `/mission-control-demo/index.html?demo=1` on the `portfolio/mission-control-center` page. Decide public vs the existing password gate.
 2. Dashboard glow-up (pro lanes): glassmorphism/gradient cards, per-agent token sparklines, animated attention rings, a top fleet-activity timeline strip, refined dark mode.
 3. Add a demo confetti beat: one agent errors then recovers to `done`, so the all-done confetti fires in the showcase (`public/demo.js`).
 4. Add the visible "Characters: Humaaans by Pablo Stanley" CC-BY credit in the office UI; mention demo mode + assets in the skill's SKILL.md.
@@ -29,15 +29,15 @@ Not started (from the original plan / asks):
 ## Verbatim resume commands (PowerShell first)
 Run the app / demo (open http://localhost:4317, or http://localhost:4317/?demo=1 for the offline showcase; Ctrl+C to stop):
 ```
-cd "C:\Users\pr\repos\1-Personal\claude-mission-control"; node server.mjs
+cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node server.mjs
 ```
 Run the smoke test:
 ```
-cd "C:\Users\pr\repos\1-Personal\claude-mission-control"; node scripts\smoke-server.mjs
+cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node scripts\smoke-server.mjs
 ```
 Inspect the repos folder tree that feeds the New session picker (no server needed):
 ```
-cd "C:\Users\pr\repos\1-Personal\claude-mission-control"; node --input-type=module -e "import { listRepos } from './terminal.mjs'; console.log(JSON.stringify(listRepos(), null, 2))"
+cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node --input-type=module -e "import { listRepos } from './terminal.mjs'; console.log(JSON.stringify(listRepos(), null, 2))"
 ```
 
 ## Gotchas discovered this session
