@@ -1,4 +1,4 @@
-# Claude Mission Control
+# Mission Control Center
 
 A local, zero-dependency command center for Claude Code: a machine-wide view of every running
 Claude Code session across all your projects, with drill-in to a live per-session subagent

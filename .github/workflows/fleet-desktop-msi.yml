@@ -1,6 +1,6 @@
 name: Fleet desktop MSI
 
-# Builds the Claude Mission Control desktop MSI and attaches it to the release.
+# Builds the Mission Control Center desktop MSI and attaches it to the release.
 # Trigger: publish a GitHub release whose tag looks like fleet-vX.Y.Z
 # (plain numeric version, MSI ProductVersion does not allow suffixes).
 # workflow_dispatch re-builds and re-uploads for an existing release tag.

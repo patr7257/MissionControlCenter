@@ -1,4 +1,4 @@
-// Preload for the Claude Mission Control window. Runs with contextIsolation on,
+// Preload for the Mission Control Center window. Runs with contextIsolation on,
 // so it uses contextBridge to expose a tiny, explicit API to the dashboard page:
 // only the update-install trigger, nothing else. CommonJS (.cjs) because the
 // preload runs in a sandboxed context, not as an ES module.

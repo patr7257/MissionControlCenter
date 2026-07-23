@@ -3,7 +3,7 @@ name: agent-fleet-monitor
 description: Use when about to dispatch 2 or more parallel subagents (especially alongside superpowers:dispatching-parallel-agents), when the user asks to "keep an overview of the agents", "show what the agents are doing", "watch the fleet", "monitor the subagents", or mentions a fleet/agent dashboard, or when the user asks to "show all my running Claude sessions", "mission control", or "manage my sessions across projects". Offers to launch a live localhost dashboard that shows every running Claude Code session machine-wide plus, per session, an animated card view of its subagents (type, task, current tool, elapsed time, steps, tokens, status).
 ---
 
-# Agent Fleet Monitor (Claude Mission Control)
+# Mission Control Center
 
 A live, localhost "mission control" view of your Claude Code work. At the top level it is a
 machine-wide board of every running session across all your projects; drilling into a session
@@ -54,7 +54,7 @@ This skill cannot pop up a dialog on its own (hooks do not ask questions). The p
    example via `superpowers:dispatching-parallel-agents`, or a fan-out of Explore/Plan/
    general-purpose agents), or when the user explicitly asks for an overview, briefly ask:
 
-   > You are about to run N agents. Want me to launch the Agent Fleet Monitor at
+   > You are about to run N agents. Want me to launch Mission Control Center at
    > http://localhost:4317 so you can watch them live? (yes / no)
 
    Ask **once**. If the user says no, do not ask again for the rest of the session. If the

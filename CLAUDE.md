@@ -1,4 +1,4 @@
-# CLAUDE.md - Claude Mission Control
+# CLAUDE.md - Mission Control Center
 
 Project instructions for Claude. Read this first each session.
 
