@@ -1,9 +1,9 @@
-# Claude Mission Control, desktop app
+# Mission Control Center, desktop app
 
 Electron shell around the existing zero-dependency mission control backend. The backend
 (`../server.mjs` and friends) runs unchanged as a detached process; this app just ensures the
 hooks and server, then shows `http://127.0.0.1:4317` in a native window. Closing the window
-(the X), the Fleet menu "Quit", and the menu "Stop server and remove hooks" all run the same
+(the X), the Mission Control Center menu "Quit", and the menu "Stop server and remove hooks" all run the same
 full teardown: they stop the detached server and remove the hooks before quitting, so nothing
 is left running in the background. (A fresh launch re-installs the hooks and restarts the server.)
 
@@ -22,7 +22,7 @@ Dev mode resolves the backend as the parent folder and coexists with `node start
 cd C:\Users\pr\repos\claude-mission-control\desktop; npm run dist
 ```
 
-Output: `dist\Claude Mission Control-<version>.msi`. Per-user install (no UAC) into
+Output: `dist\Mission Control Center-<version>.msi`. Per-user install (no UAC) into
 `%LOCALAPPDATA%\Programs`. The installed app ships the backend under `resources\backend` and
 registers hooks pointing at `resources\backend\send-event.mjs.cmd`, which runs the bundled
 Electron binary as plain Node, so the machine needs no system Node.

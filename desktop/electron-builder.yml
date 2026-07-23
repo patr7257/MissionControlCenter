@@ -1,9 +1,9 @@
-# Build config for the Claude Mission Control desktop app (Windows MSI).
+# Build config for the Mission Control Center desktop app (Windows MSI).
 # The MSI upgradeCode below must NEVER change: Windows uses it to recognise the
 # product across versions so a newer MSI upgrades in place instead of installing
 # a second copy.
 appId: dk.zrm.claude-mission-control
-productName: Claude Mission Control
+productName: Mission Control Center
 directories:
   output: dist
   buildResources: build
@@ -34,4 +34,4 @@ msi:
   runAfterFinish: true
   createDesktopShortcut: false
   createStartMenuShortcut: true
-  shortcutName: Claude Mission Control
+  shortcutName: Mission Control Center

@@ -1,4 +1,4 @@
-// Claude Mission Control desktop shell (Electron main process).
+// Mission Control Center desktop shell (Electron main process).
 // Wraps the existing zero-dependency backend unchanged: ensures the feeder
 // hooks are installed, ensures the server is running as a detached process
 // (so it survives closing this window, same model as start.mjs), then shows
@@ -248,7 +248,7 @@ function maybeNotify(port, s, seedOnly) {
   const label = s.status === 'needs-permission' ? 'Needs permission' : 'Waiting for input';
   const where = s.project || s.cwd || 'a session';
   const n = new Notification({
-    title: `Claude Mission Control: ${label}`,
+    title: `Mission Control Center: ${label}`,
     body: s.lastPrompt ? `${where}: ${s.lastPrompt}` : where,
   });
   n.on('click', () => {
@@ -306,7 +306,7 @@ async function subscribeNotifications(port) {
 function buildMenu() {
   const template = [
     {
-      label: 'Fleet',
+      label: 'Mission Control Center',
       submenu: [
         { label: 'Check for updates', click: () => checkUpdatesInteractive() },
         {
@@ -354,7 +354,7 @@ async function startApp() {
   mainWin = new BrowserWindow({
     width: 1280,
     height: 820,
-    title: 'Claude Mission Control',
+    title: 'Mission Control Center',
     autoHideMenuBar: false,
     webPreferences: {
       contextIsolation: true,

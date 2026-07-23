@@ -4,5 +4,5 @@ rem binary as plain Node (no Chromium) so the machine needs no system Node.
 rem Filename deliberately contains "send-event.mjs" so SHIM_MARK matching in
 rem install-hooks.mjs / uninstall-hooks.mjs works unchanged.
 set ELECTRON_RUN_AS_NODE=1
-"%~dp0..\..\Claude Mission Control.exe" "%~dp0send-event.mjs" %*
+"%~dp0..\..\Mission Control Center.exe" "%~dp0send-event.mjs" %*
 exit /b 0
