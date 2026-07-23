@@ -8,6 +8,9 @@ log.jsonl
 server.lock
 settings.json.fleet-monitor.bak
 
+# Co-development workflow: local per-session ack marker, not shared state.
+.claude/.codev-ack
+
 # Scratch / generated samples
 scratchpad/
 *.tmp

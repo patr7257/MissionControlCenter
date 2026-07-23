@@ -174,7 +174,7 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
   session's terminal and raises the app window. This lives only in the desktop shell; the server
   stays zero-dependency.
 - Releases: publish a GitHub release tagged `fleet-vX.Y.Z` on THIS repo
-  (`patr7257/claude-mission-control`, since the 2026-07-15 monorepo split) and
+  (`patr7257/MissionControlCenter`, since the 2026-07-15 monorepo split) and
   `.github/workflows/fleet-desktop-msi.yml` builds and attaches the MSI. See `desktop/README.md`.
   Installs older than the split check the former monorepo for updates and will not see new
   releases; upgrade those once by installing a fresh MSI from this repo by hand.

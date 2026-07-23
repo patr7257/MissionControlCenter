@@ -333,7 +333,7 @@ function errorPage() {
     <h2>Server did not start</h2>
     <p>The mission control server did not answer at ${dashUrl} within 8 seconds.</p>
     <p>Check ~/.claude/agent-fleet-monitor/log.jsonl, or run the backend by hand:
-    <code>node start.mjs</code> in the claude-mission-control folder.</p></body>`;
+    <code>node start.mjs</code> in the MissionControlCenter folder.</p></body>`;
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
 }
 
