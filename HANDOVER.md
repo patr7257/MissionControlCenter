@@ -4,13 +4,16 @@
 - Date: 2026-07-30
 - Branch: `main` (this handover is a docs-only commit straight to `main`, as agreed)
 - PRs this session: #17, #19, #21, #24 squashed and merged (issues #16, #18, #20, #22, #23 closed),
-  plus PR #26, the FINAL one, carrying issue #25 (the header icon-button gap) together with these docs.
+  plus PR #26 (issue #25, the header icon-button gap, together with these docs), also merged.
+- Board all Done, no open PRs, no open issues.
 - CI green on every branch and on `main` after each merge.
 - Releases published automatically by those merges: `fleet-v0.1.9`, `0.1.10` (dead, see below),
-  `0.1.11`, and **`fleet-v0.1.12`, which is what is installed and running**:
-  `https://github.com/patr7257/MissionControlCenter/releases/tag/fleet-v0.1.12`
-- Installed build verified: `ProductVersion 0.1.12.0`, packaged `app/package.json` says `0.1.12`,
-  app running and serving `http://localhost:4317`.
+  `0.1.11`, `0.1.12`, and **`fleet-v0.1.13`, which is what is installed and confirmed working**:
+  `https://github.com/patr7257/MissionControlCenter/releases/tag/fleet-v0.1.13`
+- Installed build verified end to end: `FileVersion 0.1.13`, the app's own update check reports
+  "You are on the latest version (0.1.13)", and two fixes were confirmed by eye in the running app:
+  the header icon buttons are one pair at the right end, and a session card shows the RENAMED title
+  (`MCC new fixes`) where it used to be stuck on the auto-generated `missioncontrolcenter-62`.
 
 ## READ THIS FIRST: three traps this session paid for in full
 1. **`wt` splits on `;` even inside ONE quoted argument.** Every `; ...` segment becomes another tab
@@ -96,9 +99,14 @@ Not started (carried over):
 4. Confirm the two remaining best-effort behaviours by hand: `wt focus-tab` against a COLD managed
    window, and whether the `SetForegroundWindow` nudge raises the window or only flashes the taskbar
    icon while the app is in the background.
-5. Optional: two obsolete MSIs are sitting in `C:\Users\pr\Downloads`
-   (`Mission.Control.Center.0.1.11.msi` and `0.1.12.msi`, 111 MB each) plus older ones. Safe to
-   delete now that 0.1.12 is installed.
+5. **The updater DOWNLOAD-AND-INSTALL path is still unproven from a fixed build.** Its read path is
+   proven (0.1.13 correctly reports "You are on the latest version") and the command shape is proven
+   by `scripts/check-installer-launch.mjs`, but every install this session ended up being done by
+   hand from `Downloads`. Next time a release lands, accept the banner and watch for two things: a
+   `cmc-update-*` dir under `%TEMP%` holding the NEW version MSI (proves the download ran), and the
+   app quitting a few seconds later (proves teardown plus msiexec ran). If that temp dir holds only
+   an OLDER MSI, the banner was simply never accepted and nothing is broken: that is what misled me
+   into reporting a stalled upgrade near the end of this session.
 
 ## Verbatim resume commands (PowerShell first)
 Start the app from the repo (installs hooks AND the statusline wrap, serves http://localhost:4317):
