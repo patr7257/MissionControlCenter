@@ -1,22 +1,111 @@
 name: Fleet desktop MSI
 
-# Builds the Mission Control Center desktop MSI and attaches it to the release.
-# Trigger: publish a GitHub release whose tag looks like fleet-vX.Y.Z
-# (plain numeric version, MSI ProductVersion does not allow suffixes).
-# workflow_dispatch re-builds and re-uploads for an existing release tag.
-
+# Builds the Mission Control Center desktop MSI and publishes it as a GitHub
+# release. Two ways in, both ending in a `fleet-vX.Y.Z` release with the MSI
+# attached (the in-app updater finds it by tag and downloads `*.msi`):
+#
+# - AUTO: every push to `main`, i.e. every merged PR, bumps the PATCH of the
+#   latest release (fleet-v0.1.5 -> fleet-v0.1.6), builds with that version
+#   baked in, and publishes. Merges that only touch docs, `.claude/` or this
+#   workflow directory are skipped by the version job, so a typo fix does not
+#   mint a version and a 116 MB build.
+# - MANUAL: pushing a `fleet-v*` tag releases exactly that version. Use it for
+#   a deliberate minor or major bump; the next auto release counts on from it.
+#
+# workflow_dispatch behaves like AUTO from whatever ref it runs on.
+#
+# NOTE: this workflow must NOT trigger on `release: published`. It publishes
+# releases itself now, so a release trigger would make it build a second time
+# for its own release. That WAS the only trigger before auto-release existed.
+#
+# The MSI ProductVersion has to increase for an in-place upgrade to work, which
+# is exactly what a patch bump guarantees. `desktop/electron-builder.yml`'s
+# `upgradeCode` GUID must never change for the same reason; nothing here touches
+# it. The version in `desktop/package.json` is deliberately NOT the source of
+# truth: the build stamps it from the version resolved below.
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "fleet-v*"
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Existing fleet-vX.Y.Z release tag to build and upload to"
-        required: true
+
+# Queue release runs rather than overlapping them: two quick merges must never
+# resolve to the same next version.
+concurrency:
+  group: fleet-release
+  cancel-in-progress: false
 
 jobs:
+  # Decides the version to release, and whether to release at all.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      skip: ${{ steps.ver.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SKIP=false
+
+          if [[ "${GITHUB_REF}" == refs/tags/fleet-v* ]]; then
+            # Manual path: the tag IS the version.
+            V="${GITHUB_REF_NAME#fleet-v}"
+            if [[ ! "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Tag '${GITHUB_REF_NAME}' must look like fleet-vX.Y.Z (MSI ProductVersion allows no suffixes)" >&2
+              exit 1
+            fi
+          else
+            # Auto path: bump the patch of the newest known release.
+            LATEST=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
+            if [[ -z "$LATEST" ]]; then
+              LATEST=$(git tag --list 'fleet-v*' --sort=-v:refname | head -1)
+            fi
+            if [[ -z "$LATEST" ]]; then
+              LATEST=fleet-v0.1.0
+            fi
+            BASE="${LATEST#fleet-v}"
+            if [[ ! "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Latest release tag '$LATEST' is not fleet-vX.Y.Z, refusing to guess a next version" >&2
+              exit 1
+            fi
+            IFS=. read -r MA MI PA <<< "$BASE"
+            V="$MA.$MI.$((PA+1))"
+
+            # Nothing shippable changed: skip rather than mint a version for a
+            # docs merge. Reads as "are there any changed files that do NOT
+            # match the ignore list"; if there are none, skip.
+            if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+              CHANGED=$(git diff --name-only HEAD^ HEAD 2>/dev/null || true)
+              if [[ -n "$CHANGED" ]] && ! grep -qvE '^(.*\.md$|docs/|\.claude/|\.github/)' <<< "$CHANGED"; then
+                SKIP=true
+              fi
+            fi
+          fi
+
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=fleet-v$V" >> "$GITHUB_OUTPUT"
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+          if [[ "$SKIP" == "true" ]]; then
+            echo "Docs-only change, skipping the release (would have been fleet-v$V)."
+          else
+            echo "Releasing fleet-v$V"
+          fi
+
   msi:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'fleet-v')
+    needs: version
+    if: needs.version.outputs.skip != 'true'
     runs-on: windows-latest
     permissions:
       contents: write
@@ -31,13 +120,8 @@ jobs:
         with:
           node-version: 22
 
-      - name: Set app version from tag
-        run: |
-          $tag = if ('${{ github.event_name }}' -eq 'release') { '${{ github.event.release.tag_name }}' } else { '${{ inputs.tag }}' }
-          if ($tag -notmatch '^fleet-v\d+\.\d+\.\d+$') { Write-Error "Tag '$tag' must look like fleet-vX.Y.Z"; exit 1 }
-          $version = $tag -replace '^fleet-v', ''
-          npm version $version --no-git-tag-version --allow-same-version
-          Add-Content -Path $env:GITHUB_ENV -Value "FLEET_TAG=$tag"
+      - name: Stamp the app version
+        run: npm version ${{ needs.version.outputs.version }} --no-git-tag-version --allow-same-version
 
       - name: Install dependencies
         run: npm ci
@@ -47,9 +131,22 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
-      - name: Upload MSI to the release
-        run: |
-          $msi = (Get-ChildItem dist/*.msi | Select-Object -First 1).FullName
-          gh release upload $env:FLEET_TAG $msi --clobber
+      # Publishes the release, creating the tag and release when they do not
+      # exist yet (the auto path), and attaches the MSI. Paths here are
+      # repo-relative: `defaults.run.working-directory` applies only to `run`
+      # steps, never to `uses` steps.
+      - name: Publish the release with the MSI attached
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Mission Control Center ${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: desktop/dist/*.msi
+          overwrite_files: true
+          # Never publish a release with no installer attached: an empty release
+          # would look successful and the in-app updater would find a newer tag
+          # with nothing to download.
+          fail_on_unmatched_files: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1318,13 +1318,24 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  try {
-    fs.writeFileSync(
-      LOCK_FILE,
-      JSON.stringify({ port: PORT, pid: process.pid, startedAt: nowMs() })
-    );
-  } catch {
-    // if we cannot write the lock, the shim simply will not find us (safe)
+  // The lock file is how send-event.mjs and statusline-feed.mjs find the ONE
+  // real server, so a throwaway test server must never claim it. Skipped under
+  // CMC_DRY_RUN for the same reason sessions.json and managed-tabs.json are:
+  // otherwise a test run on a scratch port overwrites the lock, and because the
+  // cleanup below only fires on a GRACEFUL exit, a killed test server leaves the
+  // machine pointing at a dead port and every hook silently no-ops until the
+  // next real start. (That happened for real on 2026-07-30: a test server left
+  // port 4319 in the lock while the installed app served 4317, and the running
+  // app quietly stopped receiving events.)
+  if (!process.env.CMC_DRY_RUN) {
+    try {
+      fs.writeFileSync(
+        LOCK_FILE,
+        JSON.stringify({ port: PORT, pid: process.pid, startedAt: nowMs() })
+      );
+    } catch {
+      // if we cannot write the lock, the shim simply will not find us (safe)
+    }
   }
   process.stdout.write(`agent-fleet-monitor listening at http://localhost:${PORT}\n`);
   loadPersistedSessions();
