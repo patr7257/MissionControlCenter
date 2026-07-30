@@ -2,12 +2,14 @@
 
 ## Date, branch, PR, CI
 - Date: 2026-07-30
-- Branch: `feat/auto-release-and-contextual-stats`
-- PR: #14 (draft) `https://github.com/patr7257/MissionControlCenter/pull/14`
-- Earlier this session: PR #13 merged (squash, `d8ddb43`), release `fleet-v0.1.5` published with
-  `Mission.Control.Center.0.1.5.msi` attached (116 MB).
-- **Releases are now automatic on merge to `main`.** Merging #14 will publish `fleet-v0.1.6` by
-  itself, since it touches `public/**`. Install that rather than 0.1.5.
+- Branch: `main` (this handover update is a docs-only commit straight to `main`)
+- PRs: #13 merged (`d8ddb43`) and #14 merged (`56758d2`), both squashed, both branches deleted. No
+  open PRs.
+- CI: green on both.
+- **Releases are automatic on merge to `main` as of #14, and it is PROVEN.** Merging #14 published
+  `fleet-v0.1.6` with `Mission.Control.Center.0.1.6.msi` (116 MB) attached, with no manual step, and
+  the tag points at the merge commit. `fleet-v0.1.5` was the last hand-published release.
+- **Install `fleet-v0.1.6`**: `https://github.com/patr7257/MissionControlCenter/releases/tag/fleet-v0.1.6`
 
 ## TLDR of session outcome
 Shipped in `fleet-v0.1.5` (PR #13):
@@ -24,7 +26,7 @@ Shipped in `fleet-v0.1.5` (PR #13):
   picker.
 - `scripts/render-check.mjs`: real-Chromium CDP verification, zero dependencies.
 
-In PR #14 (this branch, not yet merged):
+Shipped in `fleet-v0.1.6` (PR #14):
 - **Auto-release on merge to `main`**, ported from `patr7257/todolist`'s `build-installers.yml`. A
   `version` job bumps the patch of the latest release; the `msi` job stamps, builds and publishes.
   Docs-only merges (`*.md` at any depth, `docs/`, `.claude/`, `.github/`) skip. Runs are queued so
@@ -58,21 +60,19 @@ Not started (carried over):
 - Demo confetti beat (the demo loop ends on an error, so all-done confetti never fires).
 
 ## Prioritized next steps
-1. Merge PR #14 (CI green first). That auto-publishes `fleet-v0.1.6` and is the live proof the release
-   automation works.
-2. Install `fleet-v0.1.6` from a REAL client (Fleet menu > Download & install) and confirm the in-app
-   update path. This has been open since 0.1.5 and is still unverified.
-3. Run `node start.mjs` once so the statusline wrap installs, then confirm the top-bar 5h/7d rings and
+1. Install `fleet-v0.1.6` from a REAL client (Fleet menu > Download & install) and confirm the in-app
+   update path. This has been open since 0.1.5 and is still the only unverified part of the pipeline.
+2. Run `node start.mjs` once so the statusline wrap installs, then confirm the top-bar 5h/7d rings and
    the per-card context rings populate, and that your terminal statusline still renders identically.
-4. Verify the original bug is gone end to end: trigger a permission prompt, approve it, and watch the
+3. Verify the original bug is gone end to end: trigger a permission prompt, approve it, and watch the
    card leave `NEEDS PERMISSION` within about a second instead of at end of turn.
-5. Add `desktop/assets/statusline-feed.mjs.cmd` (mirroring `send-event.mjs.cmd`) and set
+4. Add `desktop/assets/statusline-feed.mjs.cmd` (mirroring `send-event.mjs.cmd`) and set
    `CMC_STATUSLINE_COMMAND` in `desktop/main.mjs`, so packaged MSI installs also feed the quota
    meters. Until then they stay blank in an installed app while working fine from `node start.mjs`.
-6. Validate the focus/reattach half of the terminal integration by hand: click a card
+5. Validate the focus/reattach half of the terminal integration by hand: click a card
    (`wt focus-tab`), use Resume on a closed card (`claude --resume`), and judge whether the
    `SetForegroundWindow` nudge raises the window or just flashes the taskbar icon.
-7. patrickrobelweb public embed, then the remaining carried-over polish items.
+6. patrickrobelweb public embed, then the remaining carried-over polish items.
 
 ## Verbatim resume commands (PowerShell first)
 Start the app (installs hooks AND the statusline wrap, starts the server, opens http://localhost:4317):
