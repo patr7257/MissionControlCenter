@@ -33,7 +33,16 @@ See `docs/plans/` and `docs/specs/` for the design and roadmap.
 - Hooks: `install-hooks.mjs` merges a set of hooks into `~/.claude/settings.json` while active;
   `uninstall-hooks.mjs` removes exactly those; `send-event.mjs` is the per-hook shim that POSTs
   to the server and no-ops instantly when the server is down. `start.mjs` / `stop.mjs`
-  orchestrate.
+  orchestrate. `removeHooks()` returns `{ hooks, statusline }`, not a bare count, because a run
+  can restore the statusLine while removing zero hooks; use `describeRemoval()` to report it.
+- Statusline wrap (the SECOND thing we mutate in `~/.claude/settings.json`, see "Usage feed"):
+  `install-hooks.mjs` also repoints `settings.statusLine` at `statusline-feed.mjs`, recording the
+  user's real value verbatim in `~/.claude/agent-fleet-monitor/statusline-original.json` first
+  (`{had:false}` when there was none, so uninstall can tell "there was nothing" from "there was
+  this"). Idempotent: a second install never re-records over its own wrapper. Honours
+  `CMC_STATUSLINE_COMMAND` exactly as hooks honour `CMC_HOOK_COMMAND`. Uninstall only acts when
+  the current command still contains `STATUSLINE_MARK`, so a statusLine changed by hand while we
+  were installed is never clobbered.
 - Front-end (`public/`): `store.js` (data + SSE + view registry), `view-cards.js` (professional
   lanes) and `view-office.js` (2.5D office scene), `humaaans.js` (recolorable character SVG
   templates), `style.css`, `index.html` (shell). There is no top-level Pro/Office toggle: the two
@@ -155,18 +164,156 @@ Landed 2026-07-19 (PRs #3, #4, #6, #8):
   capped at 5 levels / 4000 nodes), and the New session bar renders one dropdown per level, each
   defaulting to "Not selected", launching in the deepest folder actually selected (or the root).
 
+## Usage feed: context window and 5h/7d quota (`statusline-feed.mjs`)
+The 5-hour and 7-day rate-limit windows and the true context-window percentage are in NO hook
+payload, in NO transcript, and there is no `claude usage` subcommand. The only local source is the
+JSON Claude Code pipes on stdin to the configured `statusLine` command, which carries
+`rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}` (`resets_at` in unix SECONDS),
+`context_window.{used_percentage,total_input_tokens,context_window_size}`,
+`model.{id,display_name}` (`display_name` is the human readable "Opus 5") and `session_name`.
+Do not go looking for another source; the OAuth usage endpoint would break the
+zero-network-at-runtime rule.
+
+`statusline-feed.mjs` wraps the user's real statusline: it reads stdin once, spawns the recorded
+original command with `shell: true` (it is a command STRING, not argv) piping the same stdin in and
+its stdout straight out, exits with the child's code, and IN PARALLEL fire-and-forget POSTs the
+payload to `/statusline`. It must never `process.exit(0)` eagerly the way `send-event.mjs` does,
+since that would kill the child before it prints, and it deliberately has NO safety-net timeout
+because killing the child early would truncate the statusline. Three record outcomes are distinct
+on purpose: a real command runs it, `{had:false}` prints nothing (correct, the user had no
+statusline), and a missing or unreadable record prints a one-line "record missing" hint rather than
+silently blanking a statusline the user does have.
+
+Wire additions: sessions carry `modelDisplay`, `ctxPct`, `ctxTokens`, `ctxSize`, `usageAt`; the
+snapshot carries `usage: { fiveHour:{pct,resetsAt}, sevenDay:{pct,resetsAt}, at }` (ms epoch) and
+there is a new `{ type:'usage' }` SSE frame. Known and accepted: the statusline only re-runs when a
+session renders, so with everything idle the quota freezes; the UI dims the meters and shows an age
+once `usage.at` is over 5 minutes old rather than implying the number is current. A `refreshInterval`
+was deliberately NOT added (it would boot a node process per session every N seconds). Packaged
+desktop installs still need a `statusline-feed.mjs.cmd` Electron-as-node wrapper, mirroring
+`send-event.mjs.cmd`, before the meters populate there.
+
+## Status freshness: why a card used to lie about needing input
+Claude Code notifies when it ASKS for permission and never when you ANSWER, and `PreToolUse` for
+the main session used to be dropped (`if (!agentId) return`). So after an approval the session
+worked for minutes while the board still said `NEEDS PERMISSION`, clearing only on the next `Stop`
+or prompt. Two layers now fix it:
+- **Instant:** main-session tool events (no `agent_id`) move `awaiting`/`needs-permission` to
+  `working` via `unblockMainSessionOnToolActivity()`. These fire on every tool call, so broadcasts
+  happen only on real change and pure activity refreshes are throttled (4s).
+- **Authoritative:** `reconcileSessionRegistry()` polls `~/.claude/sessions/<pid>.json`, Claude
+  Code's own live registry (`status`, `waitingFor`, `statusUpdatedAt`, `name`, `sessionId`, `cwd`),
+  every 2500ms (`CMC_REGISTRY_POLL_MS`, measured ~3.7ms per tick over 5 files). `busy`/`running`
+  map to working, `waiting`/`idle`/`blocked` to waiting-ish, anything unrecognised changes nothing
+  and logs once. Precedence matters: `busy` always wins (this is what kills the stale badge), but
+  `waiting` must NOT overwrite the more specific `needs-permission`. A present file with a live pid
+  (`process.kill(pid, 0)`, treating `EPERM` as alive) means `live:true`; a vanished file clears
+  `live` and degrades an in-flight status to `recent`, never to `ended` (`SessionEnd` owns that). A
+  `statusUpdatedAt` older than 5 minutes still proves the session runs but its status is not
+  trusted. This registry is also strictly better than the old `ide/*.lock` `isCwdLive` heuristic and
+  hands over each session's name for free.
+
 ## Startup defaults of the Sessions board (fixed, deliberately not remembered)
 The board always opens in the same state, so a launch never needs the controls re-set by hand:
-- Repos picker: `DEFAULT_REPO_CHAIN` in `view-sessions.js` (`['2-ZRM', 'customers']`) is preselected
+- Repos picker (now inside the New session popup, not a permanent bar): `DEFAULT_REPO_CHAIN` in
+  `view-sessions.js` (`['2-ZRM', 'customers']`) is preselected
   level by level, matching folder NAMES case-insensitively; a missing name just stops the walk and
   leaves "Not selected". `loadRepos()` refetches `/repos` only when no real chain is on screen, so
-  drilling into a session's Details and back no longer wipes the current selection.
+  reopening the popup no longer wipes the current selection.
 - Show filters: fixed `{ state: 'active', time: 'today', repo: '' }`. The three former
   `fleetFlt*` localStorage keys are gone on purpose: a stale stored value silently overrode the
-  default. In-session changes still work, they just do not carry to the next app open.
+  default. In-session changes still work, they just do not carry to the next app open. The state
+  dropdown also offers `needs-input` and the time dropdown a 7 day window.
+
+## Sessions board UI (the "Editorial" card, chosen from 5 rendered candidates)
+Design record: `https://claude.ai/code/artifact/d611c0ef-2208-4da3-90fb-4334b3d49e40` (variant 05).
+- **Card layout**, one concern per line, nothing overlapping: uppercase mono status line with a
+  glowing pip, 18px title (the session name, else the project), a mono line underneath that never
+  repeats the heading (named cards show `project / branch`, unnamed cards show the branch alone), the
+  prompt as a 2-line-clamped pull quote, and a hairline footer with mono meta left and the action
+  buttons right. `.sc-details`/`.sc-reopen` are NOT absolutely positioned any more; that overlay was
+  the original overlap bug.
+- **CSS GOTCHA, do not undo:** `.session-card` sets `grid-template-columns: minmax(0, 1fr)`. A bare
+  implicit `auto` column takes its growth limit from max-content and free-space distribution only
+  ever GROWS tracks, so a long session name sized the column past the card (measured: a 538px track
+  in a 432px card), pushing the context ring and buttons outside the card where `overflow:hidden` ate
+  them, at every window width. The `min-width:0` on `.sc-h` and the ellipsis on `.sc-title` only work
+  once the track is clamped. This was invisible to static review and only showed up under a real
+  render.
+- **Status colour is CSS-owned** via the `status-*` class and a `--sc` custom property. The old
+  inline `dot.style.background` write is gone; reintroducing it would beat every stylesheet rule.
+  `needs-permission` is coral `--perm` (`#ff8a5c`), no longer sharing amber with `working`, since the
+  one state that demands action must not look like the one that does not.
+- **Severity ramp** (`.lo`/`.mid`/`.hi` setting `--sev`) is shared by the card's context ring and the
+  top-bar quota rings: under 60 accent blue, 60 to 85 amber, 85 and over `--error`. Semantic colour,
+  deliberately separate from the accent.
+- **New session is a green button in `.nav`** next to Sessions, opening a modal (`#newSessionBackdrop`
+  holds the visibility, the panel inside does not) with the cascading repo picker, Name and Launch.
+  Esc and backdrop close it, focus goes to the Name field on open and back to the opener on close.
+  The picker functions were MOVED, not rewritten; only the host element and `ns-select` -> `sel`
+  changed.
+- **The attention pill is a filter control**, not a badge: clicking it calls
+  `ViewSessions.setStateFilter('needs-input')` and syncs the visible `<select>`. When the blocked
+  count hits zero the filter self-heals back to `active`, but it leaves a manual choice alone.
+  `Store.needsInput(s)` is the single shared predicate behind the counter and the filter.
+- **Resume on closed cards** POSTs `/reopen` with NO confirm (there is no duplicate-tab risk for a
+  closed session); `Reopen` keeps its confirm and only appears on an active card whose focus attempt
+  came back `unmanaged` (gated by the `is-active` class). `terminal.reopenSession(id, cwd, title)`
+  titles the resumed tab with the session name.
+- `Store.fmt.model(session)` prettifies `claude-opus-5[1m]` to `Opus 5 (1M)`, preferring the
+  server's `modelDisplay`, unknown ids passing through unchanged.
+- The four header stat tiles (`working`/`done`/`steps`/`elapsed`) are still subagent-scoped, so they
+  read 0 on the board itself. Pre-existing, untouched, and worth revisiting.
+
+## GitHub account per session (why `gh auth switch` must never be used here)
+Patrick runs several sessions at once across two GitHub accounts, `patr7257` (personal) and `przrm`
+(ZRM work). `gh auth switch` writes the active account to ONE machine-wide file
+(`%AppData%\Roaming\GitHub CLI\hosts.yml`), and `~/.gitconfig` routes github.com credentials through
+`gh auth git-credential`, so concurrent sessions fought over it and pushes authenticated as the
+wrong account. Do not "fix" an account problem with `gh auth switch`; it corrupts every other
+running session.
+
+The isolation primitive is `GH_CONFIG_DIR`, which is per process. Two config dirs exist, each with
+its own login: `~/.config/gh-personal` and `~/.config/gh-work`.
+
+Two layers, so the right account is used whether or not anything sets an env var:
+- **Machine default, by directory.** `~/.gitconfig` pins the credential helper to the personal
+  config dir, and an `includeIf "gitdir/i:C:/Users/pr/repos/2-ZRM/"` at the END of the file pulls in
+  `~/.gitconfig-zrm`, which resets the helper list and pins the work dir plus the `pr@zrm.dk`
+  identity. The include must stay last: `credential.helper` is MULTI-valued and accumulates, so an
+  empty `helper =` line is what resets the inherited list. Without the reset the personal helper
+  answers first and wins. So: `~/repos/2-ZRM/**` is work, everything else is personal, with no
+  session awareness at all.
+- **Per session, at launch.** `terminal.mjs` owns `GH_ACCOUNTS` (derived from `os.homedir()`,
+  overridable via `CMC_GH_DIR_PERSONAL` / `CMC_GH_DIR_WORK`), `defaultAccountForPath()` (matches
+  `matchPath` on path-segment boundaries, case-insensitively, so a repo named `my-2-ZRMish` does not
+  match) and `resolveAccount()`. `launchSession(repo, title, name, accountKey)` prepends
+  `$env:GH_CONFIG_DIR` plus the four `GIT_AUTHOR_*`/`GIT_COMMITTER_*` vars to the hosted PowerShell
+  command, so that tab alone is pinned. Setting the identity vars too is deliberate: otherwise an
+  overridden session would authenticate as one account and commit as the other. `reopenSession`
+  applies the same prefix, resolved from the session's cwd. `resolveAccount()` is the security
+  boundary: only a fixed registry key is ever accepted, since the value lands in a shell command.
+  `GET /repos` exposes `accounts` (never the config dir paths) and the New session popup renders a
+  GitHub account dropdown that auto-follows the selected folder and can be overridden per launch.
+
+Note `~/.gitconfig` also has `url."https://github.com/".insteadOf = git@github.com:`, which rewrites
+SSH remotes to HTTPS. Any future SSH-key-per-account idea has to account for that rewrite, or it
+silently ends up back on the shared HTTPS credential path.
+
+## Verification tooling
+- `node scripts/smoke-server.mjs` - hermetic temp HOME, boots the server, checks the endpoints, hook
+  ingestion, statusline ingestion, registry reconciliation and launch command shapes. Runs in CI.
+- `node scripts/render-check.mjs` - drives a REAL Chromium over the Chrome DevTools Protocol using
+  Node's built-in global `WebSocket` (no dependencies, nothing installed), asserting card geometry
+  across viewport widths, the filters, the popup and the account picker, and collecting console
+  errors. SKIPS with exit 0 when no browser is present, so it is deliberately not in CI.
+  `--shot <file>` saves a screenshot. This exists because a CSS grid blowout (see the card notes
+  above) was invisible to code review and took one real measurement to find. Two traps it encodes:
+  `chrome --dump-dom` never returns on this page because the open SSE connection means load never
+  completes, and the popup's visibility lives on `#newSessionBackdrop`, not on the panel.
 
 ## Named sessions (`claude --name`)
-The New session bar has an optional Name field. A name is sanitized in `terminal.mjs`
+The New session popup has an optional Name field. A name is sanitized in `terminal.mjs`
 (`sanitizeSessionName`: strips `" \` ; & | < >`, collapses whitespace, drops a trailing backslash,
 caps at 60 chars) and then used twice: as the Windows Terminal tab title, and as
 `claude --name '<name>'` inside the PowerShell command, so Claude shows it in the prompt box, the

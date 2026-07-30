@@ -6,12 +6,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { removeHooks } from './uninstall-hooks.mjs';
+import { removeHooks, describeRemoval } from './uninstall-hooks.mjs';
 
 const LOCK_FILE = path.join(os.homedir(), '.claude', 'agent-fleet-monitor', 'server.lock');
 
 function main() {
-  const removed = removeHooks();
+  const removal = removeHooks();
 
   let stopped = false;
   try {
@@ -34,7 +34,7 @@ function main() {
   }
 
   process.stdout.write(
-    `Fleet monitor stopped${stopped ? '' : ' (server was not running)'}; removed ${removed} hook group(s).\n`
+    `Fleet monitor stopped${stopped ? '' : ' (server was not running)'}; ${describeRemoval(removal)}.\n`
   );
 }
 

@@ -25,11 +25,16 @@ const LOG_FILE = path.join(DATA_DIR, 'log.jsonl');
 // reboot) does not lose the board. Rehydrated on start and merged with the
 // backfill scan; writes are debounced and skipped under CMC_DRY_RUN.
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+// Global usage (5h/7d rate-limit windows) persisted alongside the sessions
+// file; see the `usage` module-level state below.
+const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
 // Persisted sessions older than this (by lastActivityAt) are dropped on load so
-// the file cannot grow without bound. Ended sessions get a shorter horizon since
-// they carry no future activity. A hard count cap backs both up.
+// the file cannot grow without bound. Ended sessions used to get a shorter
+// (24h) horizon, but that hid yesterday's closed-but-resumable sessions from
+// the board, so they now share the same 7-day window as everything else. A
+// hard count cap backs both up.
 const SESSIONS_PERSIST_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7d
-const SESSIONS_ENDED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+const SESSIONS_ENDED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7d (raised from 24h)
 const SESSIONS_MAX_PERSISTED = 200;
 
 // Port: default 4317, override with --port <n>
@@ -59,6 +64,12 @@ const agents = new Map();
 const sessions = new Map();
 const sseClients = new Set();
 let firstSeenAt = null;
+
+// Account-wide 5h/7d rate-limit usage, fed by the statusLine wrapper
+// (POST /statusline). Not tied to any one session, since Claude's rate limits
+// are per-account, not per-session. Shape: { fiveHour: {pct, resetsAt}|null,
+// sevenDay: {pct, resetsAt}|null, at }, or null before we ever hear from it.
+let usage = null;
 
 function nowMs() {
   return Date.now();
@@ -104,6 +115,12 @@ function serializeSession(s) {
     live: s.live,
     subagentCount: countSubagents(s.id),
     source: s.source,
+    // Fed by the statusLine wrapper (POST /statusline); null until it fires.
+    modelDisplay: s.modelDisplay != null ? s.modelDisplay : null,
+    ctxPct: s.ctxPct != null ? s.ctxPct : null,
+    ctxTokens: s.ctxTokens != null ? s.ctxTokens : null,
+    ctxSize: s.ctxSize != null ? s.ctxSize : null,
+    usageAt: s.usageAt != null ? s.usageAt : null,
   };
 }
 
@@ -118,6 +135,7 @@ function snapshotPayload() {
     firstSeenAt,
     agents: Array.from(agents.values()),
     sessions: Array.from(sessions.values()).map(serializeSession),
+    usage,
   };
 }
 
@@ -303,6 +321,12 @@ function ensureSession(id, cwd, transcriptPath) {
       live: true,
       source: 'hook',
       transcript: transcriptPath || null,
+      // Fed by the statusLine wrapper (POST /statusline); see serializeSession.
+      modelDisplay: null,
+      ctxPct: null,
+      ctxTokens: null,
+      ctxSize: null,
+      usageAt: null,
       // Internal only, never serialized (see serializeSession): true once this
       // session has seen a top-level hook (SessionStart/UserPromptSubmit). Until
       // then its status is derived from its subagents instead of sitting on the
@@ -342,8 +366,23 @@ function saveSessionsNow() {
       (a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0)
     );
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(arr.slice(0, SESSIONS_MAX_PERSISTED)));
+    // Global usage is small and always-current, so it rides the same debounced
+    // write as the sessions file rather than getting its own timer.
+    fs.writeFileSync(USAGE_FILE, JSON.stringify(usage));
   } catch {
     // best effort only
+  }
+}
+
+// Shared by loadPersistedSessions() below and reconcileSessionRegistry()
+// (see the statusline/registry section further down): a session with nothing
+// left proving it is still live (not seen this run, or its registry file
+// just disappeared) degrades one notch to 'recent' rather than jumping
+// straight to 'ended', which only a real SessionEnd hook may set. A session
+// that is not in-flight (already 'recent', 'ended', or 'done') is untouched.
+function downgradeToRecentIfInFlight(session) {
+  if (session.status === 'working' || session.status === 'awaiting' || session.status === 'needs-permission') {
+    session.status = 'recent';
   }
 }
 
@@ -365,13 +404,24 @@ function loadPersistedSessions() {
       // says otherwise, and any in-flight status would be a stale spinner, so
       // downgrade it to 'recent'. Live hooks re-upgrade it on the next event.
       s.live = false;
-      if (s.status === 'working' || s.status === 'awaiting' || s.status === 'needs-permission') {
-        s.status = 'recent';
-      }
+      downgradeToRecentIfInFlight(s);
       sessions.set(s.id, s);
     }
   } catch {
     // no persisted state yet, or unreadable: start fresh
+  }
+}
+
+// Rehydrate the last-known global usage on start, so a restart shows the last
+// real numbers instead of blank until the next statusline invocation. Best
+// effort; a missing or unreadable file just leaves `usage` at its null default.
+function loadPersistedUsage() {
+  if (process.env.CMC_DRY_RUN) return;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf8'));
+    if (parsed && (parsed.fiveHour || parsed.sevenDay)) usage = parsed;
+  } catch {
+    // no persisted usage yet, or unreadable: start fresh
   }
 }
 
@@ -423,6 +473,37 @@ function deriveSubagentOnlyStatus(session) {
   return true;
 }
 
+// Main-session tool calls (no agent_id) used to be dropped on the floor
+// entirely (see the old `if (!agentId) return` in PreToolUse/PostToolUse
+// below), so once a permission prompt was approved the session sat on
+// 'needs-permission' (or 'awaiting') for the rest of the turn: PreToolUse and
+// PostToolUse fire per tool call, but the only hooks that used to clear a
+// blocked status were Stop (whole turn done) or UserPromptSubmit (the next
+// prompt), which can be minutes away on a long tool-heavy turn. This proves
+// the session is unblocked the moment its own tool activity resumes.
+//
+// Fires on every tool call, so this must not flood the SSE stream: the
+// status transition itself (session actually was blocked) is immediate and
+// always returns true, but once the session is already 'working' a pure
+// activity refresh is throttled to at most once every
+// MAIN_SESSION_ACTIVITY_BROADCAST_MS. Same true/false-means-broadcast
+// contract as deriveSubagentOnlyStatus above, so the caller only pushSession
+// when this returns true.
+const MAIN_SESSION_ACTIVITY_BROADCAST_MS = 4000;
+function unblockMainSessionOnToolActivity(session) {
+  if (!session) return false;
+  if (session.status === 'awaiting' || session.status === 'needs-permission') {
+    session.status = 'working';
+    return true;
+  }
+  const now = nowMs();
+  if (!session._lastToolActivityBroadcastAt || now - session._lastToolActivityBroadcastAt >= MAIN_SESSION_ACTIVITY_BROADCAST_MS) {
+    session._lastToolActivityBroadcastAt = now;
+    return true;
+  }
+  return false;
+}
+
 function handleEvent(payload) {
   const ev = payload && payload.hook_event_name;
   const agentId = payload && payload.agent_id;
@@ -464,6 +545,12 @@ function handleEvent(payload) {
       } catch {
         // best effort only, never let binding affect session tracking
       }
+      // Claude Code sends session_title on SessionStart for ANY named session
+      // (claude --name), not just ones launched from Mission Control, which
+      // is why this runs in addition to (and after) the bindSession-derived
+      // name above: applyLaunchName no-ops once a title is already set, so
+      // the Mission Control launch name (if any) still wins ties.
+      if (payload.session_title) applyLaunchName(session, payload.session_title);
       pushSession(session);
       return;
     }
@@ -540,7 +627,13 @@ function handleEvent(payload) {
       break;
     }
     case 'PreToolUse': {
-      if (!agentId) return; // ignore main-session tool calls
+      if (!agentId) {
+        // Main-session tool call: no agent to track, but it proves the
+        // session itself is unblocked. Never creates an agent/card.
+        const session = sessionId ? sessions.get(sessionId) : null;
+        if (unblockMainSessionOnToolActivity(session)) pushSession(session);
+        return;
+      }
       const agent = ensureAgent(agentId, agentType, payload.session_id);
       agent.currentTool = tool || agent.currentTool;
       agent.busy = true;
@@ -553,7 +646,11 @@ function handleEvent(payload) {
     }
     case 'PostToolUse':
     case 'PostToolUseFailure': {
-      if (!agentId) return;
+      if (!agentId) {
+        const session = sessionId ? sessions.get(sessionId) : null;
+        if (unblockMainSessionOnToolActivity(session)) pushSession(session);
+        return;
+      }
       const agent = ensureAgent(agentId, agentType, payload.session_id);
       agent.steps += 1;
       agent.lastTool = tool || agent.lastTool;
@@ -588,6 +685,102 @@ function handleEvent(payload) {
     const session = sessions.get(sessionId);
     if (session && !session.sawTopLevel && deriveSubagentOnlyStatus(session)) {
       pushSession(session);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Statusline ingestion (best effort, never throws)
+// ---------------------------------------------------------------------------
+// Normalizes one rate_limits window ({used_percentage, resets_at}, resets_at
+// in unix SECONDS) into the wire shape ({pct, resetsAt}, resetsAt in ms
+// epoch). Returns null for a missing/malformed window so the caller can tell
+// "this window was not in the payload" apart from a real 0.
+function normalizeRateLimitWindow(win) {
+  if (!win || typeof win.used_percentage !== 'number') return null;
+  const resetsAt = typeof win.resets_at === 'number' ? win.resets_at * 1000 : null;
+  return { pct: win.used_percentage, resetsAt };
+}
+
+// POST /statusline handler. The payload is the same JSON Claude Code pipes on
+// stdin to the statusLine command (see statusline-feed.mjs); it carries no
+// hook_event_name, so this is entirely separate from handleEvent() above.
+function handleStatusline(payload) {
+  if (!payload || typeof payload !== 'object') return;
+
+  // Resolve the session: by session_id first, then fall back to matching a
+  // tracked session by normalized cwd (statusline payloads are not guaranteed
+  // to carry a session_id).
+  let session = null;
+  if (payload.session_id) session = sessions.get(payload.session_id) || null;
+  if (!session && payload.cwd) {
+    const normalizedCwd = terminal.normalizePath(payload.cwd);
+    for (const s of sessions.values()) {
+      if (s.cwd && terminal.normalizePath(s.cwd) === normalizedCwd) {
+        session = s;
+        break;
+      }
+    }
+  }
+
+  if (session) {
+    let changed = false;
+    const model = payload.model || {};
+    if (typeof model.display_name === 'string' && model.display_name !== session.modelDisplay) {
+      session.modelDisplay = model.display_name;
+      changed = true;
+    }
+    // This is the only way a backfilled (never-hooked) session ever learns
+    // its model: SessionStart normally sets it, but a session discovered by
+    // backfillSessions() never gets that hook.
+    if (!session.model && typeof model.id === 'string') {
+      session.model = model.id;
+      changed = true;
+    }
+    const ctx = payload.context_window || {};
+    if (typeof ctx.used_percentage === 'number' && ctx.used_percentage !== session.ctxPct) {
+      session.ctxPct = ctx.used_percentage;
+      changed = true;
+    }
+    if (typeof ctx.total_input_tokens === 'number' && ctx.total_input_tokens !== session.ctxTokens) {
+      session.ctxTokens = ctx.total_input_tokens;
+      changed = true;
+    }
+    if (typeof ctx.context_window_size === 'number' && ctx.context_window_size !== session.ctxSize) {
+      session.ctxSize = ctx.context_window_size;
+      changed = true;
+    }
+    if (typeof payload.session_name === 'string' && payload.session_name.trim() && !session.title) {
+      applyLaunchName(session, payload.session_name);
+      changed = true;
+    }
+    // Always advance so the next broadcast (triggered by a real change, here
+    // or on a later event) carries a fresh recency timestamp, without forcing
+    // a broadcast purely because time passed (statusline fires frequently).
+    session.usageAt = nowMs();
+    if (changed) pushSession(session);
+  }
+
+  // Global usage windows are account-wide, not per-session. The whole
+  // rate_limits key is absent when neither window exists yet, so a missing
+  // key must never clobber a previously known good value; a present window
+  // that failed to normalize (see normalizeRateLimitWindow) falls back to
+  // whatever was already known for that window, for the same reason.
+  if (payload.rate_limits && typeof payload.rate_limits === 'object') {
+    const fiveHour = normalizeRateLimitWindow(payload.rate_limits.five_hour);
+    const sevenDay = normalizeRateLimitWindow(payload.rate_limits.seven_day);
+    if (fiveHour || sevenDay) {
+      const nextFiveHour = fiveHour || (usage && usage.fiveHour) || null;
+      const nextSevenDay = sevenDay || (usage && usage.sevenDay) || null;
+      const usageChanged =
+        !usage ||
+        JSON.stringify(usage.fiveHour) !== JSON.stringify(nextFiveHour) ||
+        JSON.stringify(usage.sevenDay) !== JSON.stringify(nextSevenDay);
+      usage = { fiveHour: nextFiveHour, sevenDay: nextSevenDay, at: nowMs() };
+      if (usageChanged) {
+        broadcast({ type: 'usage', usage });
+        scheduleSaveSessions();
+      }
     }
   }
 }
@@ -742,6 +935,11 @@ function backfillSessions() {
         live: isCwdLive(cwd),
         source: 'backfill',
         transcript: c.filePath,
+        modelDisplay: null,
+        ctxPct: null,
+        ctxTokens: null,
+        ctxSize: null,
+        usageAt: null,
       });
       added += 1;
     }
@@ -751,6 +949,152 @@ function backfillSessions() {
   } catch {
     // backfill is best effort; never throw
   }
+}
+
+// ---------------------------------------------------------------------------
+// Session registry reconciliation (best effort, never throws)
+// ---------------------------------------------------------------------------
+// Claude Code maintains ~/.claude/sessions/<pid>.json, one small file per
+// currently-running session, which is authoritative ground truth for live
+// status: far better than the ~/.claude/ide/*.lock heuristic in isCwdLive()
+// above (kept as-is; it still seeds a first guess for a brand-new backfilled
+// session before this reconcile pass gets to it). Polled on a short interval
+// since the files are tiny and there are only ever a handful.
+const SESSIONS_REGISTRY_DIR = path.join(HOME, '.claude', 'sessions');
+// Overridable so tests can poll fast without changing the production default.
+const REGISTRY_POLL_MS = parseInt(process.env.CMC_REGISTRY_POLL_MS, 10) || 2500;
+// A registry file whose statusUpdatedAt is older than this is treated as an
+// untrustworthy reading (the writer may have died mid-update without
+// removing the file): its mere presence with a live pid still proves the
+// session is running, but its status is not used to move ours.
+const REGISTRY_STALE_MS = 5 * 60 * 1000; // 5 minutes
+
+// Status vocabulary is not documented. Observed live: 'busy', 'waiting'.
+// Also present as string literals in the CLI binary: 'running', 'idle',
+// 'blocked'. Mapped defensively below; anything else is left alone (see
+// warnedUnknownRegistryStatus) so an unrecognised future value can never
+// move a session's status out from under it.
+const REGISTRY_STATUS_WORKING = new Set(['busy', 'running']);
+const REGISTRY_STATUS_WAITING = new Set(['waiting', 'idle', 'blocked']);
+// Logged once per distinct unknown value (not once per poll), so an
+// unrecognised status is discoverable without spamming the console.
+const warnedUnknownRegistryStatus = new Set();
+
+// process.kill(pid, 0) is a signal-free existence probe on every platform
+// Node supports, including Windows. Used to skip a stale registry file left
+// behind by a process that crashed instead of cleaning up after itself.
+function registryPidAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e && e.code === 'EPERM'; // exists but not signalable: still alive
+  }
+}
+
+// Session ids backed by a live, pid-verified registry file as of the last
+// poll. Diffed against the current poll so a file that disappears (session
+// exited) or whose pid died (crashed without cleanup) can be detected and
+// downgraded exactly once, the same tick it happens rather than lingering.
+let lastRegistryLiveSessionIds = new Set();
+
+function reconcileSessionRegistry() {
+  let files;
+  try {
+    files = fs.existsSync(SESSIONS_REGISTRY_DIR)
+      ? fs.readdirSync(SESSIONS_REGISTRY_DIR).filter((f) => f.endsWith('.json'))
+      : [];
+  } catch {
+    return; // best effort only
+  }
+
+  const now = nowMs();
+  const nowLiveIds = new Set();
+
+  for (const file of files) {
+    let entry;
+    try {
+      entry = JSON.parse(fs.readFileSync(path.join(SESSIONS_REGISTRY_DIR, file), 'utf8'));
+    } catch {
+      continue; // half-written this tick, or otherwise unreadable: skip, not fatal
+    }
+    if (!entry || !entry.sessionId) continue;
+    if (!registryPidAlive(entry.pid)) continue; // stale file for a dead process
+
+    nowLiveIds.add(entry.sessionId);
+
+    const session = ensureSession(entry.sessionId, entry.cwd, null);
+    let changed = false;
+
+    if (!session.live) {
+      session.live = true;
+      changed = true;
+    }
+
+    // name is a direct, universal source for a session's display name (every
+    // named session, not only ones launched from Mission Control), strictly
+    // better than the bindSession deferred-join, which stays in place as a
+    // fallback for the moment before this registry file exists.
+    if (typeof entry.name === 'string' && entry.name.trim() && !session.title) {
+      applyLaunchName(session, entry.name);
+      changed = true;
+    }
+
+    const statusUpdatedAt = typeof entry.statusUpdatedAt === 'number' ? entry.statusUpdatedAt : null;
+    const trustworthy = statusUpdatedAt === null || now - statusUpdatedAt <= REGISTRY_STALE_MS;
+    const rawStatus = typeof entry.status === 'string' ? entry.status : null;
+
+    if (trustworthy && rawStatus) {
+      if (REGISTRY_STATUS_WORKING.has(rawStatus)) {
+        // Always wins, even over 'needs-permission': this is what actually
+        // clears a stale blocked status once the session's own tool activity
+        // resumes (belt-and-suspenders alongside the PreToolUse/PostToolUse
+        // fix above, since the registry is authoritative either way).
+        if (session.status !== 'working') {
+          session.status = 'working';
+          changed = true;
+        }
+      } else if (REGISTRY_STATUS_WAITING.has(rawStatus)) {
+        if (session.status === 'needs-permission') {
+          // Keep: a permission prompt is a more specific kind of waiting
+          // than the registry's generic 'waiting'/'idle'/'blocked'.
+        } else if (session.status !== 'awaiting') {
+          session.status = 'awaiting';
+          changed = true;
+        }
+      } else if (!warnedUnknownRegistryStatus.has(rawStatus)) {
+        warnedUnknownRegistryStatus.add(rawStatus);
+        console.warn(
+          `reconcileSessionRegistry: unrecognised registry status "${rawStatus}" ` +
+          '(leaving this session\'s status untouched; will not warn again for this value)'
+        );
+      }
+    }
+
+    if (changed) {
+      session.lastActivityAt = now;
+      pushSession(session);
+    }
+  }
+
+  // Anything live last poll but not this poll lost its registry backing
+  // (process exited, or its pid died without cleanup): clear live and, if it
+  // was in an in-flight status, degrade it to 'recent' rather than 'ended'
+  // (only a real SessionEnd hook may set that), matching how a rehydrated
+  // session is downgraded on startup in loadPersistedSessions() above.
+  for (const id of lastRegistryLiveSessionIds) {
+    if (nowLiveIds.has(id)) continue;
+    const session = sessions.get(id);
+    if (!session) continue;
+    const before = session.status;
+    const wasLive = session.live;
+    session.live = false;
+    downgradeToRecentIfInFlight(session);
+    if (wasLive || session.status !== before) pushSession(session);
+  }
+
+  lastRegistryLiveSessionIds = nowLiveIds;
 }
 
 // ---------------------------------------------------------------------------
@@ -852,10 +1196,39 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && url === '/statusline') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 5_000_000) req.destroy(); // guard against runaway payloads
+    });
+    req.on('end', () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        handleStatusline(payload);
+      } catch {
+        // a malformed payload must never crash the server
+      }
+      res.writeHead(204);
+      res.end();
+    });
+    return;
+  }
+
   if (req.method === 'GET' && url === '/repos') {
     const repos = terminal.listRepos();
+    // accounts is the registry projected to what the UI needs: never the
+    // configDir (a local filesystem path with no reason to leave the machine)
+    // or anything else secret.
+    const accounts = terminal.GH_ACCOUNTS.map((a) => ({
+      key: a.key,
+      label: a.label,
+      login: a.login,
+      matchPath: a.matchPath || null,
+      isDefault: !!a.isDefault,
+    }));
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(repos));
+    res.end(JSON.stringify({ ...repos, accounts }));
     return;
   }
 
@@ -874,7 +1247,11 @@ const server = http.createServer((req, res) => {
         // `name` is optional: when set it becomes the Claude display name
         // (claude --name) and the tab title, and lands on the session record
         // once the first hook lets terminal.bindSession() join the two.
-        result = terminal.launchSession(repo, title, payload.name);
+        // `account` is optional: when set (and valid) it pins the session to
+        // that GitHub account; terminal.launchSession() does the validation
+        // and falls back to the path default on its own, so an invalid or
+        // absent key is never handled here.
+        result = terminal.launchSession(repo, title, payload.name, payload.account);
       } catch (error) {
         result = { ok: false, error: String(error) };
       }
@@ -920,7 +1297,8 @@ const server = http.createServer((req, res) => {
         const sessionId = payload.sessionId;
         const session = sessions.get(sessionId);
         const cwd = session ? session.cwd : null;
-        result = terminal.reopenSession(sessionId, cwd);
+        const title = session ? session.title : null;
+        result = terminal.reopenSession(sessionId, cwd, title);
       } catch (error) {
         result = { ok: false, error: String(error) };
       }
@@ -950,8 +1328,11 @@ server.listen(PORT, '127.0.0.1', () => {
   }
   process.stdout.write(`agent-fleet-monitor listening at http://localhost:${PORT}\n`);
   loadPersistedSessions();
+  loadPersistedUsage();
   backfillSessions();
   setInterval(backfillSessions, 30000);
+  reconcileSessionRegistry();
+  setInterval(reconcileSessionRegistry, REGISTRY_POLL_MS);
 });
 
 function shutdown() {

@@ -8,6 +8,8 @@
   var views = new Map();   // id -> view object
   var activeId = null;
   var tickFns = [];        // per-second callbacks (views register their live-timer work)
+  var usage = null;        // account-wide 5h/7d quota, or null before we ever hear from it
+  var usageFns = [];       // callbacks fired whenever usage changes (top-bar meters)
 
   function snapshot() {
     return { firstSeenAt: firstSeenAt, agents: Array.from(agents.values()), sessions: Array.from(sessions.values()) };
@@ -26,6 +28,18 @@
     var sessionsView = views.get('sessions');
     if (sessionsView && typeof sessionsView.sessionsChanged === 'function') sessionsView.sessionsChanged();
   }
+  function setUsage(u) {
+    usage = u || null;
+    for (var i = 0; i < usageFns.length; i++) { try { usageFns[i](usage); } catch (e) {} }
+  }
+  function onUsage(fn) {
+    usageFns.push(fn);
+    fn(usage);
+  }
+  // Shared definition of "blocked on the user" (needs-permission / awaiting),
+  // used by the header attention pill count AND the Needs input board filter,
+  // so the two never drift apart.
+  function needsInput(s) { return !!s && (s.status === 'needs-permission' || s.status === 'awaiting'); }
 
   // ---- Attention: surface sessions blocked on the user (needs-permission /
   // awaiting) even when the window is not focused, via a header pill, the
@@ -36,7 +50,7 @@
   var attnCount = 0;
   function updateAttention() {
     var n = 0;
-    sessions.forEach(function (s) { if (s.status === 'needs-permission' || s.status === 'awaiting') n += 1; });
+    sessions.forEach(function (s) { if (needsInput(s)) n += 1; });
     attnCount = n;
     var pill = document.getElementById('attention');
     if (pill) {
@@ -125,6 +139,7 @@
       firstSeenAt = msg.firstSeenAt || null; Store.firstSeenAt = firstSeenAt;
       (msg.agents || []).forEach(upsert);
       (msg.sessions || []).forEach(upsertSession);
+      setUsage(msg.usage);
       var v = active(); if (v) v.reset(snapshot());
       notifySessionsChanged();
       updateAttention();
@@ -135,6 +150,8 @@
       upsertSession(msg.session);
       notifySessionsChanged();
       updateAttention();
+    } else if (msg.type === 'usage') {
+      setUsage(msg.usage);
     }
   }
 
@@ -156,13 +173,40 @@
   function shortId(id) { return id ? String(id).slice(0, 6) : '?'; }
   function hashStr(s) { var h = 0; s = String(s || ''); for (var i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; } return Math.abs(h); }
 
+  // Human readable model name, e.g. "claude-opus-5[1m]" -> "Opus 5 (1M)",
+  // "claude-haiku-4-5-20251001" -> "Haiku 4.5". Shared by the session card,
+  // the breadcrumb and demo.js so there is exactly one prettifier. Accepts
+  // either a session-like object ({ modelDisplay, model }) or two positional
+  // args (modelDisplay, modelId); prefers the server's modelDisplay when
+  // present, otherwise prettifies the raw id. Unknown ids pass through
+  // unchanged rather than rendering blank.
+  function prettyModelId(raw) {
+    if (!raw) return '';
+    var id = String(raw);
+    var big = /\[1m\]$/i.test(id);
+    id = id.replace(/\[1m\]$/i, '');
+    var m = id.match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?$/i);
+    if (!m) return raw;
+    var family = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+    var version = m[3] ? (m[2] + '.' + m[3]) : m[2];
+    var out = family + ' ' + version;
+    if (big) out += ' (1M)';
+    return out;
+  }
+  function fmtModel(a, b) {
+    if (a && typeof a === 'object') return a.modelDisplay || prettyModelId(a.model) || '';
+    return a || prettyModelId(b) || '';
+  }
+
   window.Store = {
     agents: agents, sessions: sessions, firstSeenAt: firstSeenAt,
     get selectedSessionId() { return selectedSessionId; },
+    get usage() { return usage; },
     registerView: registerView, setActive: setActive, getActiveId: getActiveId,
     snapshot: snapshot, onTick: onTick, connect: connect, ingest: handleMessage,
     visibleAgents: visibleAgents, visibleAgentIds: visibleAgentIds,
     selectSession: selectSession, clearSession: clearSession,
-    fmt: { dur: fmtDur, tokens: fmtTokens, esc: esc, shortId: shortId, hash: hashStr }
+    onUsage: onUsage, needsInput: needsInput,
+    fmt: { dur: fmtDur, tokens: fmtTokens, esc: esc, shortId: shortId, hash: hashStr, model: fmtModel }
   };
 })();

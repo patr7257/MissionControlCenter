@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 const SKILL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SETTINGS = path.join(os.homedir(), '.claude', 'settings.json');
 const BACKUP = SETTINGS + '.fleet-monitor.bak';
+const DATA_DIR = path.join(os.homedir(), '.claude', 'agent-fleet-monitor');
 
 // Forward slashes work for node on every platform and avoid JSON escaping noise.
 const SHIM = path.join(SKILL_DIR, 'send-event.mjs').split(path.sep).join('/');
@@ -19,6 +20,18 @@ export const SHIM_MARK = 'send-event.mjs';
 // The packaged desktop app overrides the command so hooks point at its shipped
 // shim wrapper (send-event.mjs.cmd) instead of "node <repo path>".
 const COMMAND = process.env.CMC_HOOK_COMMAND || `node "${SHIM}"`;
+
+// Same idea as SHIM/SHIM_MARK/COMMAND above, for the statusLine wrapper
+// instead of the event hooks: match on the bare filename so uninstall finds
+// our wrapper regardless of which absolute path install recorded, and let a
+// packaged app override the command (CMC_STATUSLINE_COMMAND) the same way
+// CMC_HOOK_COMMAND overrides the hook shim.
+const STATUSLINE_WRAPPER = path.join(SKILL_DIR, 'statusline-feed.mjs').split(path.sep).join('/');
+export const STATUSLINE_MARK = 'statusline-feed.mjs';
+const STATUSLINE_COMMAND = process.env.CMC_STATUSLINE_COMMAND || `node "${STATUSLINE_WRAPPER}"`;
+// Where the user's real statusLine value (or its absence) is recorded before
+// we overwrite settings.statusLine, so uninstall can restore it verbatim.
+export const STATUSLINE_ORIGINAL_FILE = path.join(DATA_DIR, 'statusline-original.json');
 
 // Events we feed, and whether the event supports a tool/agent matcher.
 const MATCHED = ['SubagentStart', 'SubagentStop', 'PreToolUse', 'PostToolUse'];
@@ -43,6 +56,33 @@ function groupHasOurs(group) {
   );
 }
 
+// Installs the statusline wrapper in place of the user's real statusLine
+// command, saving the original first so uninstall can restore it verbatim.
+// Idempotent: a no-op (returns false) when settings.statusLine is already
+// ours, which critically means a second install never overwrites the saved
+// original with our own wrapper. Mutates `settings` in place; the caller is
+// responsible for writing it to disk. Returns true iff it changed anything.
+function installStatusline(settings) {
+  const current = settings.statusLine;
+  if (current && typeof current.command === 'string' && current.command.includes(STATUSLINE_MARK)) {
+    return false; // already ours, nothing to do
+  }
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    // Record something unambiguous for "there was no statusLine at all" so
+    // uninstall can tell that apart from "there was one and it looked like
+    // this", rather than guessing from an empty object.
+    const record = current ? { had: true, statusLine: current } : { had: false };
+    fs.writeFileSync(STATUSLINE_ORIGINAL_FILE, JSON.stringify(record, null, 2) + '\n');
+  } catch {
+    // Could not record the original: do not touch statusLine, since uninstall
+    // would then have nothing to restore it from.
+    return false;
+  }
+  settings.statusLine = { ...(current || {}), type: 'command', command: STATUSLINE_COMMAND };
+  return true;
+}
+
 export function addHooks() {
   const settings = readSettings();
   if (!settings.hooks) settings.hooks = {};
@@ -59,7 +99,9 @@ export function addHooks() {
   for (const e of MATCHED) add(e, true);
   for (const e of UNMATCHED) add(e, false);
 
-  if (added > 0) {
+  const statuslineInstalled = installStatusline(settings);
+
+  if (added > 0 || statuslineInstalled) {
     try {
       if (fs.existsSync(SETTINGS)) fs.copyFileSync(SETTINGS, BACKUP);
     } catch {
