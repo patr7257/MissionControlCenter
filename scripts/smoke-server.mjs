@@ -14,7 +14,9 @@ const SERVER = path.join(HERE, '..', 'server.mjs');
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'cmc-smoke-'));
 const PORT = 4318;
 const BASE = `http://127.0.0.1:${PORT}`;
-const env = { ...process.env, USERPROFILE: TMP_HOME, HOME: TMP_HOME };
+// CMC_DRY_RUN keeps terminal.mjs from spawning real Windows Terminal tabs (and
+// from writing state files), so /launch can be asserted on any platform.
+const env = { ...process.env, USERPROFILE: TMP_HOME, HOME: TMP_HOME, CMC_DRY_RUN: '1' };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = false;
@@ -80,6 +82,32 @@ try {
   check('GET /repos returns 200', repos.status === 200);
   const reposBody = await repos.json();
   check('GET /repos returns a { root, tree } folder tree', reposBody && typeof reposBody.root === 'string' && Array.isArray(reposBody.tree));
+
+  // Launch command shape: the tab is hosted by PowerShell (profile loads, tab
+  // survives Claude exiting) and an optional session name is passed through as
+  // `claude --name '<name>'` with the name also used as the tab title.
+  const launchNamed = await (await fetch(`${BASE}/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: 'C:/tmp/smoke-repo', title: 'smoke name', name: 'smoke name' }),
+  })).json();
+  check('POST /launch succeeds', launchNamed && launchNamed.ok === true);
+  check(
+    'POST /launch hosts the tab in PowerShell and passes the name to claude --name',
+    launchNamed &&
+      typeof launchNamed.command === 'string' &&
+      launchNamed.command.includes('--title "smoke name"') &&
+      launchNamed.command.includes('powershell.exe -NoExit -Command "claude --name \'smoke name\'"')
+  );
+  const launchPlain = await (await fetch(`${BASE}/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: 'C:/tmp/smoke-repo', title: 'smoke-repo' }),
+  })).json();
+  check(
+    'POST /launch without a name runs bare claude under PowerShell',
+    launchPlain && launchPlain.command && launchPlain.command.endsWith('powershell.exe -NoExit -Command "claude"')
+  );
 
   await fetch(`${BASE}/event`, {
     method: 'POST',

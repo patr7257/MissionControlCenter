@@ -33,6 +33,8 @@
     <div class="new-session-bar" id="newSessionBar">
       <label class="ns-label">Repos:</label>
       <span id="newSessionSelectors" class="ns-selectors"><select class="ns-select" disabled><option>Loading...</option></select></span>
+      <label class="ns-label" for="newSessionName">Name:</label>
+      <input id="newSessionName" class="ns-input" type="text" maxlength="60" placeholder="Session name (optional)" autocomplete="off" spellcheck="false">
       <button id="newSessionBtn" class="ns-btn" type="button">New session</button>
       <span class="ns-feedback" id="newSessionFeedback"></span>
     </div>
@@ -40,12 +42,12 @@
       <label class="flt-label" for="fltState">Show:</label>
       <select id="fltState" class="flt-select">
         <option value="all">All</option>
-        <option value="active">Active</option>
+        <option value="active" selected>Active</option>
         <option value="closed">Closed</option>
       </select>
       <select id="fltTime" class="flt-select">
         <option value="all">All time</option>
-        <option value="today">Today</option>
+        <option value="today" selected>Today</option>
       </select>
       <select id="fltRepo" class="flt-select">
         <option value="">All repos</option>
@@ -96,7 +98,8 @@
         nav.style.display = inDetail ? 'none' : '';
         if (inDetail) {
           var s = Store.sessions.get(Store.selectedSessionId);
-          var label = s ? ((s.project || '(unknown project)') + (s.branch ? ' · ' + s.branch : '')) : '';
+          // Mirror the card: a named session leads with its name (claude --name).
+          var label = s ? ((s.title ? s.title + ' · ' : '') + (s.project || '(unknown project)') + (s.branch ? ' · ' + s.branch : '')) : '';
           document.getElementById('crumbSession').textContent = label;
         }
       }

@@ -271,6 +271,17 @@ function projectNameFromCwd(cwd) {
   }
 }
 
+// A session launched from the New session bar with a name was started as
+// `claude --name <name>`, but the session id only exists once its first hook
+// fires. terminal.bindSession() joins the two (by cwd, inside its bind window)
+// and hands the name back here, which is when the session finally gets its
+// label. Never overwrites a name already set.
+function applyLaunchName(session, launchName) {
+  if (!session || session.title) return;
+  const name = typeof launchName === 'string' ? launchName.trim() : '';
+  if (name) session.title = name;
+}
+
 // Create a session with defaults if missing, without downgrading anything
 // already tracked. Returns the (possibly existing) session object.
 function ensureSession(id, cwd, transcriptPath) {
@@ -449,7 +460,7 @@ function handleEvent(payload) {
       session.lastActivityAt = nowMs();
       session.sawTopLevel = true;
       try {
-        terminal.bindSession(session.cwd, sessionId);
+        applyLaunchName(session, terminal.bindSession(session.cwd, sessionId));
       } catch {
         // best effort only, never let binding affect session tracking
       }
@@ -468,7 +479,7 @@ function handleEvent(payload) {
       // between launch and hook, tab not yet up, etc). This is idempotent and
       // only ever matches an unbound tab, so it is safe to call on every prompt.
       try {
-        terminal.bindSession(session.cwd, sessionId);
+        applyLaunchName(session, terminal.bindSession(session.cwd, sessionId));
       } catch {
         // best effort only, never let binding affect session tracking
       }
@@ -860,7 +871,10 @@ const server = http.createServer((req, res) => {
         const payload = JSON.parse(body || '{}');
         const repo = payload.repo;
         const title = payload.title || path.basename(String(repo || '').replace(/[\\/]+$/, ''));
-        result = terminal.launchSession(repo, title);
+        // `name` is optional: when set it becomes the Claude display name
+        // (claude --name) and the tab title, and lands on the session record
+        // once the first hook lets terminal.bindSession() join the two.
+        result = terminal.launchSession(repo, title, payload.name);
       } catch (error) {
         result = { ok: false, error: String(error) };
       }

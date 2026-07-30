@@ -122,7 +122,10 @@
 .sc-top { display: flex; align-items: center; gap: 9px; padding-right: 46px; }
 .sc-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--muted); }
 .sc-heading { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.sc-name { font-weight: 650; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sc-project { font-weight: 650; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Named session: the name is the heading, so the project joins the muted second line. */
+.session-card.has-name .sc-project { font-weight: 400; font-size: 11px; color: var(--muted); }
 .sc-branch { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sc-status { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); flex: none; }
 
@@ -160,7 +163,7 @@
 
 /* ---- New session bar (top of Sessions view) ---- */
 .new-session-bar {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 14px 22px 0;
 }
 .ns-label { color: var(--muted); font-size: 12.5px; font-weight: 650; letter-spacing: 0.3px; }
@@ -177,6 +180,11 @@
   background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
   padding: 7px 10px; font: inherit; font-size: 12.5px; max-width: 260px;
 }
+.ns-input {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 10px; font: inherit; font-size: 12.5px; width: 190px;
+}
+.ns-input::placeholder { color: var(--muted); }
 .ns-btn {
   background: var(--accent); color: #07101f; border: 0; border-radius: 8px;
   padding: 7px 14px; font: inherit; font-size: 12.5px; font-weight: 650; cursor: pointer;
@@ -498,8 +506,8 @@ header h1 .dot { filter: drop-shadow(0 0 6px var(--accent)); }
 .ns-btn:hover { box-shadow: 0 6px 20px rgba(91,156,255,0.5); transform: translateY(-1px); }
 .ns-btn:active { transform: translateY(0); }
 
-/* Selects: clearer focus ring. */
-.ns-select:focus, .flt-select:focus {
+/* Selects and the session-name field: clearer focus ring. */
+.ns-select:focus, .flt-select:focus, .ns-input:focus {
   outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,156,255,0.25);
 }
 
