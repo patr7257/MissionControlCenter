@@ -62,8 +62,11 @@ Discovery uses user-level Claude Code hooks (SessionStart / UserPromptSubmit / S
 Notification / SessionEnd) that fire for every session, plus a backfill scan of
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`, `~/.claude/history.jsonl`, and live-status
 signals from `~/.claude/ide/*.lock`. Terminal launch/focus uses Windows Terminal
-(`wt -w cmc ...` for a managed window; `claude --resume <id>` to reattach). Note: Claude does not
-store custom terminal tab titles, so session labels derive from project + branch + last prompt.
+(`wt -w cmc ...` for a managed window; `claude --resume <id>` to reattach). Every tab is hosted by
+`powershell.exe -NoExit -Command <claude ...>` rather than running `claude` as the tab's own
+process, so the developer's PowerShell profile loads and the tab survives Claude exiting (prompt
+plus scrollback intact) instead of vanishing. Session labels derive from project + branch + last
+prompt, unless the session was named at launch (see "Named sessions" below).
 
 Status: implemented and reviewed across four phases (server sessions model + discovery/backfill +
 session hooks; `view-sessions.js` Sessions board with per-session drill-in; `terminal.mjs` launch/
@@ -149,6 +152,32 @@ Landed 2026-07-19 (PRs #3, #4, #6, #8):
   `{ root, tree }` (a bounded folder tree, dot-folders and noise dirs like `node_modules` excluded,
   capped at 5 levels / 4000 nodes), and the New session bar renders one dropdown per level, each
   defaulting to "Not selected", launching in the deepest folder actually selected (or the root).
+
+## Startup defaults of the Sessions board (fixed, deliberately not remembered)
+The board always opens in the same state, so a launch never needs the controls re-set by hand:
+- Repos picker: `DEFAULT_REPO_CHAIN` in `view-sessions.js` (`['2-ZRM', 'customers']`) is preselected
+  level by level, matching folder NAMES case-insensitively; a missing name just stops the walk and
+  leaves "Not selected". `loadRepos()` refetches `/repos` only when no real chain is on screen, so
+  drilling into a session's Details and back no longer wipes the current selection.
+- Show filters: fixed `{ state: 'active', time: 'today', repo: '' }`. The three former
+  `fleetFlt*` localStorage keys are gone on purpose: a stale stored value silently overrode the
+  default. In-session changes still work, they just do not carry to the next app open.
+
+## Named sessions (`claude --name`)
+The New session bar has an optional Name field. A name is sanitized in `terminal.mjs`
+(`sanitizeSessionName`: strips `" \` ; & | < >`, collapses whitespace, drops a trailing backslash,
+caps at 60 chars) and then used twice: as the Windows Terminal tab title, and as
+`claude --name '<name>'` inside the PowerShell command, so Claude shows it in the prompt box, the
+`/resume` picker and the terminal title. Renaming later is a plain `/rename` inside that session;
+Mission Control has no rename-after-the-fact affordance on purpose (there is no way to push a name
+into a live session without keystroke injection).
+
+The name reaches the board through the existing deferred join: `/launch` has no session id yet, so
+the sanitized name is stored as `launchName` on the `managedTabs` entry, `terminal.bindSession()`
+returns it when the session's first hook binds the tab (cwd match inside `BIND_WINDOW_MS`), and
+`server.mjs applyLaunchName()` writes it to the previously unused `session.title`, which already
+serialized and persisted. `view-sessions.js` renders `s.title` as the card heading (`.sc-name`,
+`has-name` demotes the project to the muted line) and the drill-in breadcrumb prefixes it.
 
 ## Desktop app (Electron), the sanctioned exception to zero-dependency
 `desktop/` wraps the unchanged backend in an Electron window and packages it as a Windows MSI.

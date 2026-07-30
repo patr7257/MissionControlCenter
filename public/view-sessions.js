@@ -16,19 +16,11 @@
     recent: 'var(--muted)', ended: '#5a6172'
   };
 
-  // ---- Filters (persisted in localStorage; default to showing everything so
-  // the board looks unchanged until the user narrows it) ----
-  var FILTER_KEYS = { state: 'fleetFltState', time: 'fleetFltTime', repo: 'fleetFltRepo' };
-  var filters = { state: 'all', time: 'all', repo: '' };
-  function loadFilters() {
-    try {
-      filters.state = localStorage.getItem(FILTER_KEYS.state) || 'all';
-      filters.time = localStorage.getItem(FILTER_KEYS.time) || 'all';
-      filters.repo = localStorage.getItem(FILTER_KEYS.repo) || '';
-    } catch (e) {}
-  }
-  function saveFilter(key, val) { try { localStorage.setItem(FILTER_KEYS[key], val); } catch (e) {} }
-  loadFilters();
+  // ---- Filters (fixed startup defaults, deliberately NOT persisted) ----
+  // The board always opens scoped to today's active sessions, which is what the
+  // "what is running right now" question needs. Narrowing or widening it during a
+  // session works, it just does not carry over to the next app open.
+  var filters = { state: 'active', time: 'today', repo: '' };
 
   // Active = connected right now, or in a state that is waiting on the user.
   // Everything else (ended, or an old backfilled "recent" that is not live) is
@@ -50,7 +42,7 @@
   }
 
   // Rebuild the repo dropdown from the distinct projects currently tracked,
-  // preserving the selection (falling back to All if that repo is gone).
+  // preserving the current selection (falling back to All if that repo is gone).
   function populateRepoFilter() {
     var sel = document.getElementById('fltRepo');
     if (!sel) return;
@@ -62,7 +54,7 @@
     names.forEach(function (n) {
       var o = document.createElement('option'); o.value = n; o.textContent = n; sel.appendChild(o);
     });
-    if (filters.repo && names.indexOf(filters.repo) === -1) { filters.repo = ''; saveFilter('repo', ''); }
+    if (filters.repo && names.indexOf(filters.repo) === -1) { filters.repo = ''; }
     sel.value = filters.repo;
   }
 
@@ -74,9 +66,9 @@
     st._wired = true;
     st.value = filters.state;
     tm.value = filters.time;
-    st.addEventListener('change', function () { filters.state = st.value; saveFilter('state', st.value); syncAll(); });
-    tm.addEventListener('change', function () { filters.time = tm.value; saveFilter('time', tm.value); syncAll(); });
-    rp.addEventListener('change', function () { filters.repo = rp.value; saveFilter('repo', rp.value); syncAll(); });
+    st.addEventListener('change', function () { filters.state = st.value; syncAll(); });
+    tm.addEventListener('change', function () { filters.time = tm.value; syncAll(); });
+    rp.addEventListener('change', function () { filters.repo = rp.value; syncAll(); });
   }
 
   function fmtRelative(ts) {
@@ -115,7 +107,7 @@
       '<button type="button" class="sc-reopen">Reopen</button>' +
       '<div class="sc-top">' +
         '<span class="sc-dot"></span>' +
-        '<div class="sc-heading"><span class="sc-project"></span><span class="sc-branch"></span></div>' +
+        '<div class="sc-heading"><span class="sc-name"></span><span class="sc-project"></span><span class="sc-branch"></span></div>' +
         '<span class="sc-status"></span>' +
       '</div>' +
       '<div class="sc-prompt"></div>' +
@@ -129,6 +121,7 @@
     var c = {
       el: el,
       dot: el.querySelector('.sc-dot'),
+      name: el.querySelector('.sc-name'),
       project: el.querySelector('.sc-project'),
       branch: el.querySelector('.sc-branch'),
       status: el.querySelector('.sc-status'),
@@ -225,11 +218,21 @@
       c.status.textContent = STATUS_LABEL[s.status] || s.status;
       c._status = s.status;
     }
+    // A named session (launched from here with a name, see claude --name) leads with
+    // that name and demotes the project to the secondary line; unnamed cards look
+    // exactly as they always did.
+    var name = s.title || '';
+    if (c._name !== name) {
+      c.name.textContent = name;
+      c.name.style.display = name ? '' : 'none';
+      c.el.classList.toggle('has-name', !!name);
+      c._name = name;
+    }
     var project = s.project || '(unknown project)';
     if (c._project !== project) { c.project.textContent = project; c._project = project; }
     var branch = s.branch || '';
     if (c._branch !== branch) { c.branch.textContent = branch; c._branch = branch; }
-    var prompt = s.lastPrompt || s.title || '';
+    var prompt = s.lastPrompt || '';
     if (c._prompt !== prompt) { c.prompt.textContent = prompt; c._prompt = prompt; }
     var model = s.model || '';
     if (c._model !== model) {
@@ -278,10 +281,14 @@
 
   // Cascading New session picker. /repos returns { root, tree } where tree is a
   // bounded folder tree; each dropdown lists one folder level. Choosing a folder that
-  // has subfolders spawns the next dropdown (up to MAX_SELECTORS), each defaulting to
-  // "Not selected". New session launches in the deepest folder actually selected, or
-  // the repos root if nothing is selected.
+  // has subfolders spawns the next dropdown (up to MAX_SELECTORS), each starting on
+  // "Not selected" unless DEFAULT_REPO_CHAIN preselects it. New session launches in the
+  // deepest folder actually selected, or the repos root if nothing is selected.
   var MAX_SELECTORS = 5;
+  // Folder NAMES (not paths) preselected on every app open, since nearly every session
+  // starts under this folder. Matched case-insensitively level by level; a rename, a
+  // reorganised repos folder, or a different machine simply falls back to "Not selected".
+  var DEFAULT_REPO_CHAIN = ['2-ZRM', 'customers'];
   var repoRoot = '';
   var repoTree = [];
   function oneOption(value, text) { var o = document.createElement('option'); o.value = value; o.textContent = text; return o; }
@@ -311,6 +318,25 @@
       host.appendChild(makeSelect(node.children));
     }
   }
+  // Walk DEFAULT_REPO_CHAIN, selecting one level per name and letting the normal
+  // change handler spawn the next dropdown, so the preselected chain is identical to
+  // one the user clicked together by hand. A name that is not on disk stops the walk.
+  function applyDefaultChain() {
+    var host = selectorsEl();
+    if (!host) return;
+    for (var i = 0; i < DEFAULT_REPO_CHAIN.length; i++) {
+      var sel = host.children[host.children.length - 1];
+      if (!sel || !sel._nodes) return;
+      var want = String(DEFAULT_REPO_CHAIN[i]).toLowerCase();
+      var node = null;
+      for (var j = 0; j < sel._nodes.length; j++) {
+        if (String(sel._nodes[j].name).toLowerCase() === want) { node = sel._nodes[j]; break; }
+      }
+      if (!node) return;
+      sel.value = node.path;
+      onSelectorChange(sel);
+    }
+  }
   function renderSelectors() {
     var host = selectorsEl();
     if (!host) return;
@@ -322,9 +348,15 @@
       return;
     }
     host.appendChild(makeSelect(repoTree));
+    applyDefaultChain();
   }
   function loadRepos() {
-    if (!selectorsEl()) return;
+    var host = selectorsEl();
+    if (!host) return;
+    // activate() runs on every return to the board (drilling out of a session's
+    // Details included). Once the tree is loaded and a real chain is on screen,
+    // refetching would only wipe whatever the user just picked.
+    if (repoTree.length && host.children.length && !host.children[0].disabled) return;
     fetch('/repos').then(function (res) { return res.json(); }).then(function (data) {
       repoRoot = (data && data.root) || '';
       repoTree = (data && data.tree) || [];
@@ -347,17 +379,24 @@
   function launchSession() {
     var btn = document.getElementById('newSessionBtn');
     var feedback = document.getElementById('newSessionFeedback');
+    var nameEl = document.getElementById('newSessionName');
     var repoPath = currentLaunchPath();
     if (!repoPath) return;
     var repoName = baseName(repoPath);
+    // An entered name becomes the session's display name (claude --name) AND the
+    // terminal tab title, so the tab, the Claude prompt box and the card all agree.
+    var name = nameEl ? String(nameEl.value || '').trim() : '';
+    var label = name || repoName;
     btn.disabled = true;
-    if (feedback) feedback.textContent = 'Launching ' + repoName + '...';
+    if (feedback) feedback.textContent = 'Launching ' + label + '...';
     fetch('/launch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: repoPath, title: repoName })
+      body: JSON.stringify({ repo: repoPath, title: label, name: name })
     }).then(function (res) { return res.json(); }).then(function (data) {
-      if (feedback) feedback.textContent = (data && data.ok === false) ? 'Launch failed' : 'Launched ' + repoName;
+      var failed = data && data.ok === false;
+      if (feedback) feedback.textContent = failed ? 'Launch failed' : 'Launched ' + label;
+      if (!failed && nameEl) nameEl.value = '';
       btn.disabled = false;
       setTimeout(function () { if (feedback) feedback.textContent = ''; }, 2500);
     }).catch(function () {
@@ -372,6 +411,12 @@
     if (!btn || btn._wired) return;
     btn._wired = true;
     btn.addEventListener('click', launchSession);
+    var nameEl = document.getElementById('newSessionName');
+    if (nameEl) {
+      nameEl.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !btn.disabled) launchSession();
+      });
+    }
   }
 
   function tick() {

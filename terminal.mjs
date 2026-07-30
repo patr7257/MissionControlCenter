@@ -47,7 +47,7 @@ function saveManagedTabs() {
 }
 
 // Ordered record of tabs we have opened into the managed window.
-// { sessionId, cwd, title, launchedAt, tabIndex }
+// { sessionId, cwd, title, launchName, launchedAt, tabIndex }
 // Deliberately unbounded by design: `tabIndex` is each entry's position in
 // this array, and it doubles as the literal `wt focus-tab -t <n>` argument, so
 // it must match the real Windows Terminal tab position. Trimming old entries
@@ -120,6 +120,29 @@ function buildReadableCommand(args, quotedIndexes) {
 // Fire-and-forget launch of wt.exe via cmd start, detached so Node never blocks.
 function spawnWt(args) {
   spawn('cmd', ['/c', 'start', '', 'wt', ...args], { detached: true, stdio: 'ignore' }).unref();
+}
+
+// A user-supplied session name has to survive the cmd start -> wt -> powershell
+// quoting chain, and it doubles as the Windows Terminal tab title that
+// bringToForeground() matches on. So strip the characters that would break that
+// chain (quotes, wt's own `;` command separator, shell operators, a trailing
+// backslash that would escape the closing quote) and keep it short. Returns ''
+// when nothing usable is left, which every caller treats as "no name given".
+export function sanitizeSessionName(name) {
+  let value = String(name === undefined || name === null ? '' : name);
+  value = value.replace(/["`;&|<>]/g, ' ').replace(/[\r\n\t]+/g, ' ');
+  value = value.replace(/\s+/g, ' ').trim().replace(/\\+$/, '').trim();
+  return value.slice(0, 60);
+}
+
+// The tab runs `claude` inside PowerShell rather than as the tab's own process:
+// that loads the developer's PowerShell profile and leaves a usable prompt (with
+// the scrollback intact) when Claude exits, instead of the tab vanishing.
+// Single quotes are the PowerShell literal form, so a `'` inside the name is
+// escaped by doubling it.
+function psClaudeCommand(name) {
+  if (!name) return 'claude';
+  return "claude --name '" + name.replace(/'/g, "''") + "'";
 }
 
 // Synchronous check: is any WindowsTerminal.exe process running at all? Fails
@@ -248,23 +271,36 @@ export function listRepos() {
   }
 }
 
-export function launchSession(repoPath, title) {
+// `name` is an optional user-supplied session name. When given it becomes both the
+// Claude display name (`claude --name`, shown in the prompt box, the /resume picker
+// and the terminal title) and the tab title, so the tab, Claude and the session card
+// all agree on one label. The sanitised value is stored on the managedTabs entry so
+// bindSession() can hand it back to the server once the session id exists.
+export function launchSession(repoPath, title, name) {
   try {
     clearStaleManagedTabsIfWindowGone();
-    const args = ['-w', WT_WINDOW, 'nt', '-d', repoPath, '--title', title, 'claude'];
-    // Quote the repoPath (index 4) and title (index 6): the values that may
-    // contain spaces. Everything else stays bare for readability.
-    const command = buildReadableCommand(args, new Set([4, 6]));
+    const launchName = sanitizeSessionName(name);
+    const tabTitle = launchName || title;
+    const psCommand = psClaudeCommand(launchName);
+    const args = [
+      '-w', WT_WINDOW, 'nt', '-d', repoPath, '--title', tabTitle,
+      'powershell.exe', '-NoExit', '-Command', psCommand,
+    ];
+    // Quote the repoPath (index 4), title (index 6) and the PowerShell command
+    // (index 10): the values that may contain spaces. Everything else stays bare
+    // for readability.
+    const command = buildReadableCommand(args, new Set([4, 6, 10]));
     const tabIndex = managedTabs.length;
+    const entry = { sessionId: null, cwd: repoPath, title: tabTitle, launchName, launchedAt: Date.now(), tabIndex };
 
     if (process.env.CMC_DRY_RUN) {
-      managedTabs.push({ sessionId: null, cwd: repoPath, title, launchedAt: Date.now(), tabIndex });
+      managedTabs.push(entry);
       enforceManagedTabsCap();
       return { ok: true, command, dryRun: true };
     }
 
     spawnWt(args);
-    managedTabs.push({ sessionId: null, cwd: repoPath, title, launchedAt: Date.now(), tabIndex });
+    managedTabs.push(entry);
     saveManagedTabs();
     enforceManagedTabsCap();
     return { ok: true, command };
@@ -344,12 +380,19 @@ export function reopenSession(sessionId, cwd) {
     // --title lets bringToForeground() find the right window afterwards by
     // its active tab title.
     const title = 'resume:' + sessionId;
-    const args = ['-w', WT_WINDOW, 'nt', '-d', cwd, '--title', title, 'claude', '--resume', sessionId];
-    // Quote the cwd (index 4) and title (index 6): the values that may contain
-    // spaces. Everything else, including sessionId, stays bare.
-    const command = buildReadableCommand(args, new Set([4, 6]));
+    // PowerShell hosts the tab for the same reasons as launchSession (profile
+    // loads, the tab survives Claude exiting). No --name here: the resumed
+    // session already carries whatever display name it was given.
+    const args = [
+      '-w', WT_WINDOW, 'nt', '-d', cwd, '--title', title,
+      'powershell.exe', '-NoExit', '-Command', 'claude --resume ' + sessionId,
+    ];
+    // Quote the cwd (index 4), title (index 6) and the PowerShell command
+    // (index 10): the values that may contain spaces. Everything else, including
+    // the sessionId inside that command, stays bare.
+    const command = buildReadableCommand(args, new Set([4, 6, 10]));
     const tabIndex = managedTabs.length;
-    const entry = { sessionId, cwd, title, launchedAt: Date.now(), tabIndex };
+    const entry = { sessionId, cwd, title, launchName: '', launchedAt: Date.now(), tabIndex };
 
     if (process.env.CMC_DRY_RUN) {
       managedTabs.push(entry);
@@ -368,6 +411,9 @@ export function reopenSession(sessionId, cwd) {
   }
 }
 
+// Returns the name the tab was launched with ('' when the tab had no name, or when
+// nothing was bound), so the caller can label the session with it now that the
+// session id finally exists. Never throws.
 export function bindSession(cwd, sessionId) {
   try {
     const normalizedCwd = normalizePath(cwd);
@@ -379,9 +425,10 @@ export function bindSession(cwd, sessionId) {
       if (now - tab.launchedAt > BIND_WINDOW_MS) continue;
       tab.sessionId = sessionId;
       saveManagedTabs();
-      return;
+      return tab.launchName || '';
     }
   } catch {
     // best effort only, never throw
   }
+  return '';
 }
