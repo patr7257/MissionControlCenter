@@ -638,6 +638,154 @@ try {
   check('a successful take-control clears the unmanaged mark from the card',
     !/unmanaged/.test(takeControl.classesAfterConfirm), String(takeControl.classesAfterConfirm));
 
+  // ---- Shortcuts, app history and the Settings popup. The mouse's back/forward
+  // buttons and the keyboard bindings all move through ONE history stack, so this
+  // asserts the real state transitions (board -> session -> back -> forward), not
+  // just that a handler was called. The Electron path (app-command over the
+  // preload bridge) cannot exist in plain Chromium, so it is driven here through
+  // the same entry point the bridge calls, window.Shortcuts.back/forward. ----
+  const settingsUi = await cdp.eval(`(function () {
+    document.getElementById('settingsBtn').click();
+    var bd = document.getElementById('settingsBackdrop');
+    var rows = Array.prototype.map.call(document.querySelectorAll('#settingsShortcuts .sk-row'), function (r) {
+      return {
+        keys: Array.prototype.map.call(r.querySelectorAll('kbd'), function (k) { return k.textContent; }),
+        label: (r.querySelector('.sk-label') || {}).textContent || ''
+      };
+    });
+    var groups = Array.prototype.map.call(document.querySelectorAll('#settingsShortcuts .sk-group'), function (g) { return g.textContent; });
+    var panel = document.getElementById('settingsPopup');
+    var pr = panel.getBoundingClientRect();
+    return {
+      open: getComputedStyle(bd).display !== 'none',
+      expanded: document.getElementById('settingsBtn').getAttribute('aria-expanded'),
+      focused: document.activeElement ? document.activeElement.id : null,
+      rowCount: rows.length,
+      groups: groups,
+      bindingCount: window.Shortcuts.bindings.length,
+      hasMouseToggle: !!document.getElementById('setMouseNav'),
+      insideViewport: pr.right <= window.innerWidth + 1 && pr.left >= -1,
+      sample: rows.slice(0, 3)
+    };
+  })()`);
+  check('gear button opens the Settings popup', settingsUi.open === true && settingsUi.expanded === 'true', JSON.stringify(settingsUi));
+  check('the guide lists every registered binding, generated from the registry',
+    settingsUi.rowCount === settingsUi.bindingCount && settingsUi.rowCount > 0,
+    `rows=${settingsUi.rowCount} bindings=${settingsUi.bindingCount}`);
+  check('the guide is grouped and shows real key caps',
+    settingsUi.groups.length >= 3 && settingsUi.sample.every((r) => r.keys.length > 0 && r.label.length > 0),
+    JSON.stringify(settingsUi.sample));
+  check('Settings holds the mouse-navigation setting', settingsUi.hasMouseToggle === true);
+  check('the Settings panel stays inside the viewport', settingsUi.insideViewport === true);
+  check('focus moves into the Settings dialog', settingsUi.focused === 'settingsCloseBtn', String(settingsUi.focused));
+
+  const settingsClosed = await cdp.eval(`(function () {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    var bd = document.getElementById('settingsBackdrop');
+    return { closed: getComputedStyle(bd).display === 'none',
+      focused: document.activeElement ? document.activeElement.id : null,
+      expanded: document.getElementById('settingsBtn').getAttribute('aria-expanded') };
+  })()`);
+  check('Esc closes Settings and returns focus to the gear',
+    settingsClosed.closed === true && settingsClosed.focused === 'settingsBtn' && settingsClosed.expanded === 'false',
+    JSON.stringify(settingsClosed));
+
+  const nav = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var out = {};
+      // Drill into a session the way the UI does.
+      document.querySelector('.session-card .sc-details').click();
+      setTimeout(function () {
+        out.afterDrill = { view: Store.getActiveId(), hist: window.Shortcuts.debug() };
+        // Mouse back button, via the same entry point the Electron bridge uses.
+        window.Shortcuts.back();
+        setTimeout(function () {
+          out.afterBack = { view: Store.getActiveId(), selected: Store.selectedSessionId, hist: window.Shortcuts.debug() };
+          window.Shortcuts.forward();
+          setTimeout(function () {
+            out.afterForward = { view: Store.getActiveId(), selected: Store.selectedSessionId, hist: window.Shortcuts.debug() };
+            // Alt+Left must do the same thing from the keyboard.
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }));
+            setTimeout(function () {
+              out.afterAltLeft = { view: Store.getActiveId(), hist: window.Shortcuts.debug() };
+              // A back with nothing behind it must be a no-op, not an error.
+              var extra = window.Shortcuts.back();
+              out.backAtStart = { returned: extra, view: Store.getActiveId(), hist: window.Shortcuts.debug() };
+              // The crumb must follow history moves, not just clicks.
+              out.crumbHidden = getComputedStyle(document.getElementById('crumb')).display === 'none';
+              resolve(out);
+            }, 120);
+          }, 120);
+        }, 120);
+      }, 200);
+    });
+  })()`);
+  check('drilling into a session records a history entry',
+    nav.afterDrill.view === 'detail' && nav.afterDrill.hist.length === 2 && nav.afterDrill.hist.index === 1,
+    JSON.stringify(nav.afterDrill));
+  check('back returns to the board without dropping the forward entry',
+    nav.afterBack.view === 'sessions' && nav.afterBack.selected === null && nav.afterBack.hist.index === 0 && nav.afterBack.hist.length === 2,
+    JSON.stringify(nav.afterBack));
+  check('forward re-opens the same session',
+    nav.afterForward.view === 'detail' && nav.afterForward.hist.index === 1 && nav.afterForward.hist.state.view === 'detail',
+    JSON.stringify(nav.afterForward));
+  check('Alt+Left navigates back like the mouse button',
+    nav.afterAltLeft.view === 'sessions' && nav.afterAltLeft.hist.index === 0, JSON.stringify(nav.afterAltLeft));
+  check('back at the start of history is a no-op',
+    nav.backAtStart.returned === false && nav.backAtStart.view === 'sessions' && nav.backAtStart.hist.index === 0,
+    JSON.stringify(nav.backAtStart));
+  check('the breadcrumb follows a history move, not only a click', nav.crumbHidden === true);
+
+  // Bare-letter shortcuts must not fire while typing or behind an open dialog.
+  const guards = await cdp.eval(`(function () {
+    var openBd = function (id) { return getComputedStyle(document.getElementById(id)).display !== 'none'; };
+    // 1) typing in a field
+    window.ViewSessions.openNewSession();
+    var name = document.getElementById('newSessionName');
+    name.focus();
+    name.dispatchEvent(new KeyboardEvent('keydown', { key: 's', bubbles: true }));
+    var statsAfterTyping = openBd('statsBackdrop');
+    // 2) a dialog is open, focus is not in a field
+    document.getElementById('newSessionCancelBtn').focus();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 's', bubbles: true }));
+    var statsBehindDialog = openBd('statsBackdrop');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    // 3) with nothing open, S really does open the stats popup
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 's', bubbles: true }));
+    var statsFromShortcut = openBd('statsBackdrop');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    return { statsAfterTyping: statsAfterTyping, statsBehindDialog: statsBehindDialog, statsFromShortcut: statsFromShortcut };
+  })()`);
+  check('a bare letter typed in a text field is not a shortcut', guards.statsAfterTyping === false, JSON.stringify(guards));
+  check('a bare letter behind an open dialog is not a shortcut', guards.statsBehindDialog === false, JSON.stringify(guards));
+  check('S opens the stats dashboard when nothing is open', guards.statsFromShortcut === true, JSON.stringify(guards));
+
+  // Cards must be reachable and activatable from the keyboard at all.
+  const cardKeys = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var card = document.querySelector('.session-card');
+      var focusCalls = 0;
+      var originalFetch = window.fetch;
+      window.fetch = function (url, opts) {
+        if (String(url).indexOf('/focus') !== -1) {
+          focusCalls += 1;
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, mode: 'focused' }); } });
+        }
+        return originalFetch(url, opts);
+      };
+      card.focus();
+      var focused = document.activeElement === card;
+      card.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      setTimeout(function () {
+        window.fetch = originalFetch;
+        resolve({ tabindex: card.getAttribute('tabindex'), role: card.getAttribute('role'), focused: focused, focusCalls: focusCalls });
+      }, 200);
+    });
+  })()`);
+  check('a session card is keyboard focusable', cardKeys.tabindex === '0' && cardKeys.role === 'button' && cardKeys.focused === true,
+    JSON.stringify(cardKeys));
+  check('Enter on a focused card jumps to its terminal', cardKeys.focusCalls === 1, JSON.stringify(cardKeys));
+
   const errs = cdp.jsErrors();
   check('no JS or console errors on the board', errs.length === 0, errs.slice(0, 5).join(' | '));
 
@@ -658,6 +806,17 @@ try {
     const dialogPath = SHOT.replace(/(\.png)?$/i, '') + '-take-control.png';
     fs.writeFileSync(dialogPath, Buffer.from(dialogShot.data, 'base64'));
     process.stdout.write('screenshot: ' + dialogPath + '\n');
+    // Third shot: Settings with the generated shortcuts guide.
+    await cdp.eval(`(function () {
+      document.getElementById('confirmCancelBtn').click();
+      document.getElementById('settingsBtn').click();
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    const setShot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    const setPath = SHOT.replace(/(\.png)?$/i, '') + '-settings.png';
+    fs.writeFileSync(setPath, Buffer.from(setShot.data, 'base64'));
+    process.stdout.write('screenshot: ' + setPath + '\n');
   }
 
   process.stdout.write(failures === 0 ? '\nRESULT: ALL PASS\n' : `\nRESULT: ${failures} FAILED\n`);

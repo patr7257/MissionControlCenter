@@ -453,6 +453,19 @@ async function startApp() {
     mainWin = null;
   });
 
+  // Mouse back/forward side buttons. Windows sends WM_APPCOMMAND, which arrives
+  // here as `app-command`; the renderer gets no mouse event for these buttons, so
+  // forward them over the preload bridge (see desktop/preload.cjs) and let
+  // public/shortcuts.js move through the app's own history. Not
+  // webContents.goBack(): the window only ever loads one URL, so browser history
+  // is empty and the app's navigation is board <-> session instead.
+  mainWin.webContents.on('app-command', (event, command) => {
+    if (command !== 'browser-backward' && command !== 'browser-forward') return;
+    event.preventDefault();
+    if (mainWin === null) return;
+    mainWin.webContents.send('cmc:nav', command === 'browser-backward' ? 'back' : 'forward');
+  });
+
   const up = await waitForServer(8000);
   if (mainWin === null) return; // window closed while waiting
   if (up) {
