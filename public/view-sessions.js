@@ -105,6 +105,36 @@
     return d + 'd ago';
   }
 
+  // Header stat tiles (board's slice): unlike the filtered board list, these
+  // count every tracked session so the tiles answer "what's going on machine
+  // wide", not "what's on screen right now". "needs input" reuses the exact
+  // same predicate as the attention pill and the Needs input filter so all
+  // three never drift apart. "oldest activity" is how long ago the LEAST
+  // recently active tracked session was last active; a dash when there are no
+  // sessions (or none with a timestamp) rather than a misleading '0:00'.
+  function oldestActivityTs() {
+    var oldest = null;
+    Store.sessions.forEach(function (s) {
+      if (s.lastActivityAt && (oldest === null || s.lastActivityAt < oldest)) oldest = s.lastActivityAt;
+    });
+    return oldest;
+  }
+  function updateStatTiles() {
+    var total = Store.sessions.size;
+    var needsInputN = 0, workingN = 0;
+    Store.sessions.forEach(function (s) {
+      if (Store.needsInput(s)) needsInputN += 1;
+      if (s.status === 'working') workingN += 1;
+    });
+    var oldest = oldestActivityTs();
+    Store.setStats([
+      { n: total, l: 'sessions' },
+      { n: needsInputN, l: 'needs input' },
+      { n: workingN, l: 'working' },
+      { n: oldest == null ? '-' : fmtRelative(oldest), l: 'oldest activity' }
+    ]);
+  }
+
   function sortedSessions() {
     var list = Array.from(Store.sessions.values()).filter(passesFilters);
     list.sort(function (a, b) {
@@ -359,6 +389,7 @@
           : 'No sessions tracked yet. Start a Claude Code session and it will appear here.';
       }
     }
+    updateStatTiles();
   }
 
   // Cascading New session picker, now hosted inside a popup dialog instead of
@@ -694,6 +725,9 @@
       if (!raw) return;
       c.time.textContent = fmtRelative(parseInt(raw, 10));
     });
+    // The "oldest activity" tile ages every second same as the card timestamps
+    // above; only worth recomputing while the board is actually on screen.
+    if (Store.getActiveId() === 'sessions') updateStatTiles();
   }
   Store.onTick(tick);
   Store.onTick(updateUsageMeters);

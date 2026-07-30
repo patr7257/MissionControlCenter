@@ -89,6 +89,35 @@
     setActive('sessions');
   }
 
+  // Shared writer for the 4 header stat tiles. Both boards render through this
+  // (never write #sActive/#sDone/#sSteps/#sClock or their label spans
+  // directly) so there is exactly one owner per DOM node and no view can stomp
+  // another's numbers. `list` is [{ n, l }, ...] for the 4 tiles in order; a
+  // falsy entry, or an entry missing `n` or `l`, leaves that field untouched
+  // (lets a per-second tick refresh just the value while the label stays put).
+  // Dirty-checked against the last value written, so calling this every
+  // second (or on every agent update) is cheap: unchanged fields never touch
+  // the DOM.
+  var STAT_IDS = [['sActive', 'sActiveL'], ['sDone', 'sDoneL'], ['sSteps', 'sStepsL'], ['sClock', 'sClockL']];
+  var lastStats = [{}, {}, {}, {}];
+  function setStats(list) {
+    if (!list) return;
+    for (var i = 0; i < STAT_IDS.length; i++) {
+      var item = list[i];
+      if (!item) continue;
+      if (item.n !== undefined && lastStats[i].n !== item.n) {
+        var en = document.getElementById(STAT_IDS[i][0]);
+        if (en) en.textContent = item.n;
+        lastStats[i].n = item.n;
+      }
+      if (item.l !== undefined && lastStats[i].l !== item.l) {
+        var el = document.getElementById(STAT_IDS[i][1]);
+        if (el) el.textContent = item.l;
+        lastStats[i].l = item.l;
+      }
+    }
+  }
+
   function registerView(view) { views.set(view.id, view); }
   function getActiveId() { return activeId; }
   function setActive(id) {
@@ -113,7 +142,12 @@
       var end = p[1] ? parseInt(p[1], 10) : Date.now();
       el.textContent = fmtDur(end - start);
     });
-    if (firstSeenAt) { var c = document.getElementById('sClock'); if (c) c.textContent = fmtDur(Date.now() - firstSeenAt); }
+    // The clock tile is subagent-scoped (elapsed since the run's first agent),
+    // so it is only meaningful while the detail view is showing; the sessions
+    // board owns that same DOM node for its own "oldest activity" tile (see
+    // view-sessions.js), and writing here unconditionally would stomp it every
+    // second regardless of which view is on screen.
+    if (firstSeenAt && activeId === 'detail') { setStats([null, null, null, { n: fmtDur(Date.now() - firstSeenAt) }]); }
     for (var i = 0; i < tickFns.length; i++) { try { tickFns[i](); } catch (e) {} }
     // Flash the tab title while attention is pending and the window is hidden,
     // so a blocked session is noticeable from another tab or app.
@@ -206,7 +240,7 @@
     snapshot: snapshot, onTick: onTick, connect: connect, ingest: handleMessage,
     visibleAgents: visibleAgents, visibleAgentIds: visibleAgentIds,
     selectSession: selectSession, clearSession: clearSession,
-    onUsage: onUsage, needsInput: needsInput,
+    onUsage: onUsage, needsInput: needsInput, setStats: setStats,
     fmt: { dur: fmtDur, tokens: fmtTokens, esc: esc, shortId: shortId, hash: hashStr, model: fmtModel }
   };
 })();

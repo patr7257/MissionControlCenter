@@ -57,19 +57,29 @@ workflow rather than signing by hand:
 
 ## Releases (CI-built MSI)
 
-Publishing a GitHub release with a tag like `fleet-v0.2.0` triggers
-`.github/workflows/fleet-desktop-msi.yml`, which builds the MSI on `windows-latest` and
-attaches it to the release. Rules:
+**Releases are automatic on merge to `main`** (since 2026-07-30). No manual step: merging a PR
+makes `.github/workflows/fleet-desktop-msi.yml` bump the PATCH of the latest release
+(`fleet-v0.1.5` -> `fleet-v0.1.6`), build the MSI on `windows-latest`, and publish the release
+with the MSI attached. Rules:
 
+- A merge touching ONLY `*.md`, `docs/`, `.claude/` or `.github/` releases nothing, so docs
+  fixes do not mint versions or 116 MB builds.
+- Runs are queued (`concurrency: fleet-release`), so two quick merges cannot resolve to the same
+  next version.
+- To force a specific version, push a tag: `git tag fleet-v0.2.0 && git push origin fleet-v0.2.0`.
+  Use that for deliberate minor or major bumps; the next auto release counts on from it.
 - Tag format is `fleet-vX.Y.Z`, plain numbers only (MSI ProductVersion allows no suffixes).
-- The version in this package.json is overridden by the tag at build time; no need to bump it.
+- The version in this package.json is stamped at build time, so it lags the newest tag in git.
+  That is expected; do not bump it by hand.
 - The MSI upgrades in place thanks to the fixed `upgradeCode` in `electron-builder.yml`.
   NEVER change that GUID. MSI refuses downgrades by design.
 - The MSI is unsigned; SmartScreen shows "unknown publisher" on first run. Expected.
+- The workflow must never trigger on `release: published` again: it publishes releases itself, so
+  that trigger would build a second time for its own release.
 
-The app checks for newer `fleet-v*` releases via the locally authenticated `gh` CLI
-(private repo, so no anonymous API and no baked-in token). If `gh` is missing the check
-silently does nothing. When a newer release exists, a bottom-right banner offers "Download &
+The app checks for newer `fleet-v*` releases via the locally authenticated `gh` CLI. (The repo is
+public as of 2026-07-30, so the listing would work anonymously too; `gh` is kept because the
+download path uses it anyway.) If `gh` is missing the check silently does nothing. When a newer release exists, a bottom-right banner offers "Download &
 install", and "Check for updates" in the Fleet menu offers the same on demand. Accepting it
 uses `gh release download` to fetch the new MSI, launches it with `msiexec /i`, and quits the
 app so the in-place upgrade is not blocked by locked files (`runAfterFinish` reopens the app

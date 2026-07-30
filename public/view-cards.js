@@ -50,7 +50,22 @@
     cards.forEach(function (c, id) { if (!visibleIds.has(id)) { if (c.el.parentNode) c.el.parentNode.removeChild(c.el); cards.delete(id); } });
     toggleEmpty('working'); toggleEmpty('done'); toggleEmpty('error');
     set('cWorking', counts.working); set('cDone', counts.done); set('cError', counts.error);
-    set('sActive', counts.working); set('sDone', counts.done); set('sSteps', steps);
+    // Header stat tiles (detail view's slice). The clock value is also set
+    // here (not only by store.js's 1s tick) so switching into the detail view
+    // shows a correct elapsed time immediately instead of the Sessions
+    // board's leftover number for up to a second; both writers compute the
+    // same formula off firstSeenAt, so this is not a second, conflicting
+    // owner, just an immediate first paint. The label is always reasserted so
+    // switching back from the board (which reuses these same 4 DOM nodes for
+    // its own numbers) restores "elapsed" rather than leaving "oldest
+    // activity" behind.
+    var elapsed = Store.firstSeenAt ? F.dur(Date.now() - Store.firstSeenAt) : '0:00';
+    Store.setStats([
+      { n: counts.working, l: 'working' },
+      { n: counts.done, l: 'done' },
+      { n: steps, l: 'steps' },
+      { n: elapsed, l: 'elapsed' }
+    ]);
     if (visible.length > 0) set('foot', visible.length + ' agent(s) tracked this run.');
   }
   function set(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; }

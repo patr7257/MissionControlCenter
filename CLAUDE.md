@@ -267,8 +267,18 @@ Design record: `https://claude.ai/code/artifact/d611c0ef-2208-4da3-90fb-4334b3d4
   titles the resumed tab with the session name.
 - `Store.fmt.model(session)` prettifies `claude-opus-5[1m]` to `Opus 5 (1M)`, preferring the
   server's `modelDisplay`, unknown ids passing through unchanged.
-- The four header stat tiles (`working`/`done`/`steps`/`elapsed`) are still subagent-scoped, so they
-  read 0 on the board itself. Pre-existing, untouched, and worth revisiting.
+- **The four header stat tiles are contextual, and have exactly one writer.** They used to be
+  subagent-scoped in both views, so on the board (the default view) they sat permanently at
+  0/0/0/0:00. Now the Sessions board renders `sessions` / `needs input` / `working` /
+  `oldest activity`, and the Details view renders the old `working` / `done` / `steps` / `elapsed`.
+  Both go through `Store.setStats([{n, l}, ...])`, which dirty-checks per field and sets the LABEL
+  as well as the number (the label spans have ids for this). Two things not to undo: `store.js`'s
+  per-second tick writes `#sClock` only while the detail view is active (it used to write
+  unconditionally and stomped whatever the board had put there), and `view-cards.js` also paints the
+  clock value once on `syncAll()` so drilling in does not show a stale board number for up to a
+  second. `needs input` reuses `Store.needsInput(s)`, the same predicate behind the attention pill
+  and the filter, rather than a third copy of that rule. Oldest activity reuses `fmtRelative`,
+  because `Store.fmt.dur` only does `m:ss` and would render a 3 hour age as `184:07`.
 
 ## GitHub account per session (why `gh auth switch` must never be used here)
 Patrick runs several sessions at once across two GitHub accounts, `patr7257` (personal) and `przrm`
@@ -316,6 +326,16 @@ silently ends up back on the shared HTTPS credential path.
   above) was invisible to code review and took one real measurement to find. Two traps it encodes:
   `chrome --dump-dom` never returns on this page because the open SSE connection means load never
   completes, and the popup's visibility lives on `#newSessionBackdrop`, not on the panel.
+- **Any ad hoc test server MUST run with `CMC_DRY_RUN=1` and a temp HOME.** `server.lock` is how
+  `send-event.mjs` and `statusline-feed.mjs` find the one real server, so a test server that writes
+  it hijacks the whole machine: hooks then POST to a scratch port, and since the lock is only cleaned
+  up on a GRACEFUL exit, a killed test server leaves a dead port behind and every hook silently
+  no-ops. `server.mjs` now skips the lock write under `CMC_DRY_RUN`, but a test server started
+  without it will still clobber the real lock. Symptom: the board stops updating while the app looks
+  perfectly healthy. Check with
+  `Get-Content "$env:USERPROFILE\.claude\agent-fleet-monitor\server.lock"` and compare the port to
+  what is actually listening. Also note PowerShell 5.1's `-Encoding utf8` writes a BOM, which
+  `JSON.parse` rejects, so never repair that file from PowerShell; use node.
 
 ## Named sessions (`claude --name`)
 The New session popup has an optional Name field. A name is sanitized in `terminal.mjs`
@@ -356,11 +376,26 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
   pre-existing blocked sessions do not all fire at once). Clicking the toast `POST /focus`es that
   session's terminal and raises the app window. This lives only in the desktop shell; the server
   stays zero-dependency.
-- Releases: publish a GitHub release tagged `fleet-vX.Y.Z` on THIS repo
-  (`patr7257/MissionControlCenter`, since the 2026-07-15 monorepo split) and
-  `.github/workflows/fleet-desktop-msi.yml` builds and attaches the MSI. See `desktop/README.md`.
-  Installs older than the split check the former monorepo for updates and will not see new
-  releases; upgrade those once by installing a fresh MSI from this repo by hand.
+- Releases are AUTOMATIC on merge to `main` (since 2026-07-30, modelled on `patr7257/todolist`'s
+  `build-installers.yml`). `.github/workflows/fleet-desktop-msi.yml` has a `version` job that reads
+  the latest release, bumps the PATCH (`fleet-v0.1.5` -> `fleet-v0.1.6`), then a `msi` job that
+  stamps that version, builds, and publishes the release with the MSI attached. So a merged PR ships
+  a version with no manual step. Details that matter:
+  - A merge touching ONLY `*.md`, `docs/`, `.claude/` or `.github/` sets `skip=true` and releases
+    nothing, so a typo fix does not mint a version and a 116 MB build.
+  - `concurrency: fleet-release` with `cancel-in-progress: false` QUEUES runs, so two quick merges
+    cannot both resolve to the same next version.
+  - Pushing a `fleet-v*` tag releases exactly that version. Use it for a deliberate minor or major
+    bump; the next auto release counts on from it.
+  - The workflow must NEVER trigger on `release: published` again. It publishes releases itself now,
+    so that trigger would make it build a second time for its own release.
+  - `desktop/package.json`'s version is deliberately NOT the source of truth; the build stamps it
+    from the resolved version, so it lags the newest tag in git and that is fine.
+  - The MSI ProductVersion must strictly increase for in-place upgrades, which a patch bump
+    guarantees.
+  See `desktop/README.md`. Installs older than the 2026-07-15 monorepo split check the former
+  monorepo for updates and will not see new releases; upgrade those once by installing a fresh MSI
+  from this repo by hand.
 - Auto-update: `desktop/update-check.mjs` detects a newer `fleet-v*` tag AND downloads its MSI via
   the locally authenticated `gh` CLI (`gh release download`, no baked-in token). The banner and the
   Fleet menu offer "Download & install"; accepting downloads the MSI, launches `msiexec /i`, and
