@@ -87,17 +87,22 @@ export const UPDATE_DIR_PREFIX = 'cmc-update-';
 // on the developer's machine. Sweep the previous ones before adding another.
 // Best effort and never throws: a dir still locked by a running installer is
 // skipped and cleaned on a later run. `keepDir` is the one we just created.
-export function cleanupOldUpdateDirs(keepDir) {
+//
+// `baseDir` exists so a test can point this at a sandbox. It must: the first
+// version defaulted to os.tmpdir() with no override, and running the test on a
+// real machine deleted the developer's actually-downloaded MSIs, because that is
+// precisely what this function is for. A sweep function needs a settable root.
+export function cleanupOldUpdateDirs(keepDir, baseDir = os.tmpdir()) {
   let entries;
   try {
-    entries = fs.readdirSync(os.tmpdir(), { withFileTypes: true });
+    entries = fs.readdirSync(baseDir, { withFileTypes: true });
   } catch {
     return 0;
   }
   let removed = 0;
   for (const entry of entries) {
     if (!entry.isDirectory() || !entry.name.startsWith(UPDATE_DIR_PREFIX)) continue;
-    const full = path.join(os.tmpdir(), entry.name);
+    const full = path.join(baseDir, entry.name);
     if (keepDir && path.resolve(full) === path.resolve(keepDir)) continue;
     try {
       fs.rmSync(full, { recursive: true, force: true });

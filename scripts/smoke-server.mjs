@@ -613,18 +613,21 @@ try {
   check('installer command does not wrap msiexec in start', !/\bstart\b/.test(shape.args[1]));
 
   // The temp-dir sweep must never delete the dir it was told to keep, and must
-  // never touch unrelated temp dirs.
+  // never touch unrelated dirs. Run inside a SANDBOX, never the machine's real
+  // temp: the first version of this test called the sweep with its real default
+  // root and deleted the developer's genuinely downloaded MSIs mid-session.
   const { cleanupOldUpdateDirs, UPDATE_DIR_PREFIX } = await import('../desktop/update-check.mjs');
-  const keep = fs.mkdtempSync(path.join(os.tmpdir(), UPDATE_DIR_PREFIX));
-  const stale = fs.mkdtempSync(path.join(os.tmpdir(), UPDATE_DIR_PREFIX));
-  const unrelated = fs.mkdtempSync(path.join(os.tmpdir(), 'cmc-not-an-update-'));
+  const sweepRoot = fs.mkdtempSync(path.join(TMP_HOME, 'sweep-'));
+  const keep = fs.mkdtempSync(path.join(sweepRoot, UPDATE_DIR_PREFIX));
+  const stale = fs.mkdtempSync(path.join(sweepRoot, UPDATE_DIR_PREFIX));
+  const unrelated = fs.mkdtempSync(path.join(sweepRoot, 'cmc-not-an-update-'));
   fs.writeFileSync(path.join(stale, 'old.msi'), 'x');
-  cleanupOldUpdateDirs(keep);
-  check('update dir sweep removes a previous download dir', !fs.existsSync(stale));
+  const removedCount = cleanupOldUpdateDirs(keep, sweepRoot);
+  check('update dir sweep removes a previous download dir', !fs.existsSync(stale) && removedCount === 1);
   check('update dir sweep keeps the current download dir', fs.existsSync(keep));
   check('update dir sweep leaves unrelated temp dirs alone', fs.existsSync(unrelated));
-  fs.rmSync(keep, { recursive: true, force: true });
-  fs.rmSync(unrelated, { recursive: true, force: true });
+  check('update dir sweep is scoped to the root it was given, not the real temp dir',
+    fs.existsSync(sweepRoot) && fs.readdirSync(sweepRoot).length === 2);
 
   process.stdout.write(failed ? '\nRESULT: FAIL\n' : '\nRESULT: ALL PASS\n');
   await cleanup(failed ? 1 : 0);
