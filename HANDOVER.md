@@ -157,10 +157,12 @@ cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; git tag fleet-v0.2.0; gi
 ## Environment state
 - Nothing of mine left running. No node process listening on any port, Docker not running, no cron or
   scheduled jobs, keep-awake NOT active, no stray Playwright Chromium.
-- **Your installed Mission Control Center app IS running** (PID 26892, serving port 4317). It was not
-  started or stopped by this session and was deliberately left alone.
-- `server.lock` now correctly points at that app (port 4317, verified reachable through the same code
-  path `send-event.mjs` uses).
+- The installed Mission Control Center app was running during the session (PID 26892 on port 4317)
+  and was deliberately left alone; it has since been closed from outside this session, so port 4317
+  is free and `server.lock` is correctly absent. Its own graceful shutdown removed that lock, which
+  incidentally confirms the by-hand repair had the right pid, since the cleanup only fires when
+  `lock.pid === process.pid`. `log.jsonl` kept growing after the repair, so hooks were reaching the
+  server again.
 - The statusline wrap is NOT installed: `~/.claude/settings.json` `statusLine` is still your own
   `python statusline-command.py`. It installs on the next `node start.mjs`.
 - Shared `gh` active account deliberately left as `przrm` (your work default). It no longer matters
