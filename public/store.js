@@ -87,6 +87,21 @@
     visibleAgents().forEach(function (a) { set.add(a.id); });
     return set;
   }
+  // ---- Navigation notifications (public/shortcuts.js keeps the back/forward
+  // history from these). Fired for the two real navigation transitions only.
+  // `navQuiet` exists so restoring a history entry does not record itself as a
+  // new one: back/forward call the SAME public selectSession/clearSession the UI
+  // calls (which index.html wraps to refresh the breadcrumb), just with the
+  // notification muted, so no code path can desync from the crumb. ----
+  var navFns = [];
+  var navQuiet = false;
+  function onNav(fn) { navFns.push(fn); }
+  function setNavQuiet(v) { navQuiet = !!v; }
+  function emitNav(state) {
+    if (navQuiet) return;
+    navFns.forEach(function (fn) { try { fn(state); } catch (e) {} });
+  }
+
   function selectSession(id) {
     selectedSessionId = id;
     // The combined per-session subagent view (lanes + office) is registered under
@@ -95,10 +110,12 @@
     var wasActive = (activeId === 'detail');
     setActive('detail');
     if (wasActive) { var v = active(); if (v) v.reset(snapshot()); }
+    emitNav({ view: 'detail', id: id });
   }
   function clearSession() {
     selectedSessionId = null;
     setActive('sessions');
+    emitNav({ view: 'sessions' });
   }
 
   // Shared writer for the 4 header stat tiles. Both boards render through this
@@ -252,6 +269,7 @@
     snapshot: snapshot, onTick: onTick, connect: connect, ingest: handleMessage,
     visibleAgents: visibleAgents, visibleAgentIds: visibleAgentIds,
     selectSession: selectSession, clearSession: clearSession,
+    onNav: onNav, setNavQuiet: setNavQuiet,
     onUsage: onUsage, needsInput: needsInput, doneAwaiting: doneAwaiting, setStats: setStats,
     fmt: { dur: fmtDur, tokens: fmtTokens, esc: esc, shortId: shortId, hash: hashStr, model: fmtModel }
   };

@@ -255,6 +255,11 @@
     el.className = 'session-card';
     el.setAttribute('data-id', s.id);
     el.title = 'Click to bring this session\'s terminal window to the front';
+    // The whole card is a click target, so it needs to be a keyboard target too:
+    // without this, Tab skipped straight past every card to its buttons and the
+    // primary action (jump to the terminal) was mouse-only.
+    el.setAttribute('tabindex', '0');
+    el.setAttribute('role', 'button');
     el.innerHTML =
       '<div class="sc-head">' +
         '<div class="sc-h">' +
@@ -296,6 +301,15 @@
       _id: s.id
     };
     el.addEventListener('click', function () { focusCard(c); });
+    // Enter and Space activate the card exactly like a click. Space is
+    // preventDefault'ed so it cannot scroll the board instead.
+    el.addEventListener('keydown', function (ev) {
+      if (ev.target !== el) return; // a keystroke meant for one of the buttons
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        focusCard(c);
+      }
+    });
     c.details.addEventListener('click', function (ev) {
       ev.stopPropagation();
       Store.selectSession(c._id);
