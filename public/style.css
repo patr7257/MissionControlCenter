@@ -371,8 +371,15 @@
 /* ---- Stats dashboard icon button + popup: the 4 header tiles used to sit
    in an always-visible strip; they now live behind this button, reusing the
    .pop* chrome from the New session popup so the two read as one system. ---- */
+/* The header's icon buttons are a GROUP, and the group owns the margin-left:auto
+   that pushes them to the right end. `margin-left: auto` used to sit on .icon-btn
+   itself, which worked only while there was exactly one: with two, the first
+   button's auto absorbed the free space before it and the second button's auto
+   absorbed the rest, so all the leftover width landed BETWEEN them (a very
+   visible gap). Any future header icon button joins this container instead of
+   adding another gap. */
+.hdr-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .icon-btn {
-  margin-left: auto;
   display: inline-flex; align-items: center; justify-content: center;
   width: 34px; height: 34px; border-radius: 9px; flex: none;
   background: transparent; color: var(--muted); border: 1px solid var(--line); cursor: pointer;

@@ -638,6 +638,28 @@ try {
   check('a successful take-control clears the unmanaged mark from the card',
     !/unmanaged/.test(takeControl.classesAfterConfirm), String(takeControl.classesAfterConfirm));
 
+  // ---- Header icon buttons are a PAIR at the right end. `margin-left: auto` on
+  // .icon-btn itself worked with one button and broke with two: each button's auto
+  // absorbed free space, so the leftover width landed between them as a large gap.
+  // Geometry, not classes, is what proves the layout (issue #25).
+  const hdr = await cdp.eval(`(function () {
+    var stats = document.getElementById('statsBtn').getBoundingClientRect();
+    var gear = document.getElementById('settingsBtn').getBoundingClientRect();
+    var header = document.querySelector('header').getBoundingClientRect();
+    return {
+      gap: Math.round(gear.left - stats.right),
+      statsBeforeGear: stats.right <= gear.left + 1,
+      gearNearRightEdge: Math.round(header.right - gear.right),
+      sameRow: Math.abs(stats.top - gear.top) <= 1,
+      grouped: !!document.querySelector('.hdr-actions #statsBtn') && !!document.querySelector('.hdr-actions #settingsBtn')
+    };
+  })()`);
+  check('the stats and settings buttons sit next to each other, no free-space gap',
+    hdr.gap >= 0 && hdr.gap <= 24, JSON.stringify(hdr));
+  check('stats comes first and both are on one row', hdr.statsBeforeGear === true && hdr.sameRow === true, JSON.stringify(hdr));
+  check('the pair is parked at the right end of the header', hdr.gearNearRightEdge <= 40, JSON.stringify(hdr));
+  check('both header icon buttons live in the .hdr-actions group', hdr.grouped === true, JSON.stringify(hdr));
+
   // ---- Shortcuts, app history and the Settings popup. The mouse's back/forward
   // buttons and the keyboard bindings all move through ONE history stack, so this
   // asserts the real state transitions (board -> session -> back -> forward), not
