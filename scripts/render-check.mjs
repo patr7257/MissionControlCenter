@@ -221,6 +221,18 @@ try {
       seven_day: { used_percentage: 68, resets_at: nowSec + 400000 } },
   });
 
+  // A second session driven to 'awaiting' (the Stop hook: turn finished,
+  // nothing required) via the exact same hook path a real Claude session
+  // uses. Together with SID above (driven to 'needs-permission' via a
+  // Notification permission_prompt) this is the minimal pair needed to prove
+  // the corrected status semantics: needsInput must count SID only, and
+  // doneAwaiting must count SID2 only.
+  const SID2 = 'render-2';
+  const CWD2 = path.join(TMP_HOME, 'repos', '1-Personal', 'MissionControlCenter-awaiting-demo');
+  await post('/event', { hook_event_name: 'SessionStart', session_id: SID2, cwd: CWD2, model: 'claude-sonnet-5' });
+  await post('/event', { hook_event_name: 'UserPromptSubmit', session_id: SID2, cwd: CWD2, prompt: 'Summarize the CI failures from the last run' });
+  await post('/event', { hook_event_name: 'Stop', session_id: SID2, cwd: CWD2 });
+
   const target = await waitFor(
     async () => (await getJson(CDP_PORT, '/json/list')).find((t) => t.type === 'page' && t.webSocketDebuggerUrl),
     'page target'
@@ -268,7 +280,8 @@ try {
   check('New session button exists', facts.hasNewSessionBtn);
   check('old always-on repo bar is gone', !facts.hasRepoBar);
   check('quota meters rendered', /5/.test(facts.usageText) && /7/.test(facts.usageText), JSON.stringify(facts.usageText));
-  check('Needs input filter option exists', facts.stateOptions.indexOf('needs-input') !== -1, JSON.stringify(facts.stateOptions));
+  check('Show filter is exactly All/Active/Closed, needs-input pulled out into the segmented control',
+    JSON.stringify(facts.stateOptions) === JSON.stringify(['all', 'active', 'closed']), JSON.stringify(facts.stateOptions));
   check('7 day time filter option exists', facts.timeOptions.some(function (v) { return /week|7/.test(v); }), JSON.stringify(facts.timeOptions));
   check('attention pill visible while a session is blocked', facts.attentionVisible);
 
@@ -298,15 +311,113 @@ try {
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   await new Promise((r) => setTimeout(r, 250));
 
-  // Needs-input filter, driven the way the attention pill drives it.
-  const filterResult = await cdp.eval(`(function () {
-    window.ViewSessions.setStateFilter('needs-input');
-    return { selValue: document.getElementById('fltState').value,
+  // ---- Status semantics: needs-permission is the only real block on the
+  // user; awaiting (Stop hook) is "done", informational. With SID
+  // (needs-permission) and SID2 (awaiting) both tracked, the pill must read
+  // 1 (not 2, the old bug where needsInput() counted both statuses), the
+  // done-awaiting label must read 1, and the awaiting card's own label must
+  // read "Done - awaiting user". ----
+  const semantics = await cdp.eval(`(function () {
+    var awaitingLabel = document.querySelector('.session-card.status-awaiting .sc-st-label');
+    return {
+      attVisible: (function () { var a = document.getElementById('attention'); return !!a && getComputedStyle(a).display !== 'none'; })(),
+      attCount: document.getElementById('attCount') ? document.getElementById('attCount').textContent : null,
+      doneVisible: (function () { var d = document.getElementById('doneAwaiting'); return !!d && getComputedStyle(d).display !== 'none'; })(),
+      doneCount: document.getElementById('doneCount') ? document.getElementById('doneCount').textContent : null,
+      awaitingLabel: awaitingLabel ? awaitingLabel.textContent.trim() : null
+    };
+  })()`);
+  check('needs-input pill counts only needs-permission (reads 1, not 2)', semantics.attVisible && semantics.attCount === '1', JSON.stringify(semantics));
+  check('done-awaiting label counts only awaiting (reads 1)', semantics.doneVisible && semantics.doneCount === '1', JSON.stringify(semantics));
+  check('awaiting card renders "Done - awaiting user"', semantics.awaitingLabel === 'Done - awaiting user', JSON.stringify(semantics));
+
+  // ---- Segmented "Active" sub-filter: exists with exactly 3 segments,
+  // hidden outside Active, and a real thumb that slides. ----
+  const segShape = await cdp.eval(`(function () {
+    var seg = document.getElementById('segState');
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('#segState .seg-tab'));
+    return {
+      exists: !!seg,
+      segmentCount: tabs.length,
+      segments: tabs.map(function (t) { return t.getAttribute('data-segment'); }).sort(),
+      visibleWhileActive: seg ? getComputedStyle(seg).display !== 'none' : false
+    };
+  })()`);
+  check('segmented control exists with exactly 3 segments', segShape.exists && segShape.segmentCount === 3, JSON.stringify(segShape));
+  check('segments are all / needs-input / done',
+    JSON.stringify(segShape.segments) === JSON.stringify(['all', 'done', 'needs-input']), JSON.stringify(segShape.segments));
+  check('segmented control visible while Show=Active', segShape.visibleWhileActive === true, JSON.stringify(segShape));
+
+  const segHidden = await cdp.eval(`(function () {
+    var st = document.getElementById('fltState');
+    function setAndRead(v) {
+      st.value = v; st.dispatchEvent(new Event('change'));
+      return getComputedStyle(document.getElementById('segState')).display;
+    }
+    return { onAll: setAndRead('all'), onClosed: setAndRead('closed'), onActive: setAndRead('active') };
+  })()`);
+  check('segmented control hidden when Show=All', segHidden.onAll === 'none', JSON.stringify(segHidden));
+  check('segmented control hidden when Show=Closed', segHidden.onClosed === 'none', JSON.stringify(segHidden));
+  check('segmented control visible again when Show=Active', segHidden.onActive !== 'none', JSON.stringify(segHidden));
+
+  // needs-input pill: clicking it must land on Active + the Needs input
+  // segment, and only the blocked (needs-permission) card should list.
+  const attClick = await cdp.eval(`(function () {
+    document.getElementById('attention').click();
+    var sel = document.querySelector('#segState .seg-tab[aria-selected="true"]');
+    return { state: document.getElementById('fltState').value,
+      segment: sel ? sel.getAttribute('data-segment') : null,
       cards: document.querySelectorAll('.session-card').length };
   })()`);
-  check('pill switches the visible filter to needs-input', filterResult.selValue === 'needs-input', JSON.stringify(filterResult));
-  check('blocked session still listed under Needs input', filterResult.cards >= 1, JSON.stringify(filterResult));
-  await cdp.eval(`window.ViewSessions.setStateFilter('active')`);
+  check('needs-input pill click sets state=active and segment=needs-input',
+    attClick.state === 'active' && attClick.segment === 'needs-input', JSON.stringify(attClick));
+  check('needs-input segment lists only the blocked card', attClick.cards === 1, JSON.stringify(attClick));
+
+  // done-awaiting label: same idea, but the Done segment, and only the
+  // awaiting card should list.
+  const doneClick = await cdp.eval(`(function () {
+    document.getElementById('doneAwaiting').click();
+    var sel = document.querySelector('#segState .seg-tab[aria-selected="true"]');
+    return { state: document.getElementById('fltState').value,
+      segment: sel ? sel.getAttribute('data-segment') : null,
+      cards: document.querySelectorAll('.session-card').length };
+  })()`);
+  check('done-awaiting label click sets state=active and segment=done',
+    doneClick.state === 'active' && doneClick.segment === 'done', JSON.stringify(doneClick));
+  check('done segment lists only the awaiting card', doneClick.cards === 1, JSON.stringify(doneClick));
+
+  // All active (the default segment) lists both active sessions again.
+  const allActive = await cdp.eval(`(function () {
+    document.getElementById('segAll').click();
+    return { cards: document.querySelectorAll('.session-card').length };
+  })()`);
+  check('All active segment lists both active cards', allActive.cards === 2, JSON.stringify(allActive));
+
+  // ---- Stats dashboard popup: opens from the icon button, shows the 4
+  // labelled tiles (moved off the always-visible header strip), and closes
+  // on Esc with focus returned to the button. ----
+  const statsOpen = await cdp.eval(`(function () {
+    document.getElementById('statsBtn').click();
+    var bd = document.getElementById('statsBackdrop');
+    var stats = Array.prototype.map.call(document.querySelectorAll('#statsPopup .stat'), function (s) {
+      return { n: s.querySelector('.n').textContent, l: s.querySelector('.l').textContent };
+    });
+    return { open: !!bd && getComputedStyle(bd).display !== 'none',
+      expanded: document.getElementById('statsBtn').getAttribute('aria-expanded'), stats: stats };
+  })()`);
+  check('dashboard popup opens from the icon button', statsOpen.open === true && statsOpen.expanded === 'true', JSON.stringify(statsOpen));
+  check('dashboard popup shows four labelled values',
+    statsOpen.stats.length === 4 && statsOpen.stats.every(function (s) { return !!s.l; }), JSON.stringify(statsOpen.stats));
+
+  const statsClosed = await cdp.eval(`(function () {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    var bd = document.getElementById('statsBackdrop');
+    return { closed: !!bd && getComputedStyle(bd).display === 'none',
+      focused: document.activeElement ? document.activeElement.id : null,
+      expanded: document.getElementById('statsBtn').getAttribute('aria-expanded') };
+  })()`);
+  check('Esc closes the dashboard popup, focus returns to the button',
+    statsClosed.closed === true && statsClosed.focused === 'statsBtn' && statsClosed.expanded === 'false', JSON.stringify(statsClosed));
 
   // Popup chrome. Visibility lives on the backdrop, not the panel.
   const popup = await cdp.eval(`(function () {
@@ -381,6 +492,65 @@ try {
     return !!bd && getComputedStyle(bd).display === 'none';
   })()`);
   check('Esc closes the popup', closed === true);
+
+  // ---- Empty/missing accounts fallback (2026-07-30: an installed app's
+  // updater once left an OLD backend running behind a NEW frontend, so
+  // GET /repos came back with no `accounts` field at all and the dropdown
+  // rendered completely empty). The dropdown must degrade to a disabled
+  // "No accounts available" placeholder, never a blank focused select, and
+  // Launch must still work by omitting `account` from the request body so
+  // the server's own defaultAccountForPath() decides.
+  //
+  // Forcing this state cleanly from the harness (a real backend swap) is not
+  // practical here, so it is driven in-page: window.fetch is intercepted for
+  // just this one call, /repos is answered with accounts: [], the folder
+  // host is cleared so loadRepos() re-fetches instead of using its cache,
+  // and the popup is reopened. /launch is left to hit the real server
+  // (still CMC_DRY_RUN), with its outgoing body captured for inspection. ----
+  const emptyAccounts = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch;
+      var capturedLaunchBody = null;
+      window.fetch = function (url, opts) {
+        var u = String(url);
+        if (u.indexOf('/repos') !== -1) {
+          return Promise.resolve({ json: function () {
+            return Promise.resolve({ root: 'C:/fake-empty-accounts', tree: [], accounts: [] });
+          } });
+        }
+        if (u.indexOf('/launch') !== -1 && opts && opts.body) {
+          try { capturedLaunchBody = JSON.parse(opts.body); } catch (e) {}
+        }
+        return originalFetch(url, opts);
+      };
+      var host = document.getElementById('newSessionSelectors');
+      if (host) host.innerHTML = '';
+      window.ViewSessions.openNewSession();
+      setTimeout(function () {
+        var acc = document.getElementById('newSessionAccount');
+        var options = acc ? Array.prototype.map.call(acc.options, function (o) {
+          return { value: o.value, text: o.textContent, disabled: o.disabled };
+        }) : [];
+        var btn = document.getElementById('newSessionBtn');
+        btn.click();
+        setTimeout(function () {
+          window.fetch = originalFetch;
+          resolve({
+            options: options,
+            launchBody: capturedLaunchBody,
+            popupClosed: getComputedStyle(document.getElementById('newSessionBackdrop')).display === 'none'
+          });
+        }, 400);
+      }, 400);
+    });
+  })()`);
+  check('empty accounts list renders one disabled "No accounts available" option',
+    emptyAccounts.options.length === 1 && emptyAccounts.options[0].text === 'No accounts available' && emptyAccounts.options[0].disabled === true,
+    JSON.stringify(emptyAccounts.options));
+  check('launch with no accounts available omits the account field entirely (never sends account: "")',
+    !!emptyAccounts.launchBody && !('account' in emptyAccounts.launchBody), JSON.stringify(emptyAccounts.launchBody));
+  check('launch still succeeds with no accounts available (falls back to the server default)',
+    emptyAccounts.popupClosed === true, JSON.stringify(emptyAccounts));
 
   const errs = cdp.jsErrors();
   check('no JS or console errors on the board', errs.length === 0, errs.slice(0, 5).join(' | '));

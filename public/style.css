@@ -35,7 +35,7 @@
   }
   header h1 { font-size: 16px; margin: 0; letter-spacing: 0.3px; font-weight: 650; }
   header h1 .dot { color: var(--accent); }
-  .stats { display: flex; gap: 14px; margin-left: auto; }
+  .stats { display: flex; gap: 14px; }
   .stat { text-align: right; }
   .stat .n { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .stat .l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
@@ -240,6 +240,43 @@
   padding: 6px 9px; font: inherit; font-size: 12px; max-width: 220px;
 }
 
+/* ---- Segmented "Active" sub-filter (All active / Needs input / Done -
+   awaiting user). A real slider: .seg-thumb is measured and positioned in JS
+   (view-sessions.js positionSegThumb) rather than split into equal thirds,
+   since the three labels have very different natural widths. ---- */
+.seg {
+  position: relative; display: inline-flex; align-items: center;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; padding: 3px; gap: 2px;
+  /* At very narrow widths the three segments' natural widths (they are not
+     equal thirds, see .seg-thumb) can add up to more than the filter bar's
+     own row, which .filter-bar's flex-wrap cannot fix since this is a single
+     item, not several. Rather than let it push the whole page into
+     horizontal scroll, it becomes its own tiny scroller: max-width caps it to
+     whatever room the row actually has (percentages resolve against the
+     flex container's content box), and overflow-x clips/scrolls the excess
+     internally. Scrollbar hidden since this reads as a control, not a pane. */
+  max-width: 100%; overflow-x: auto; scrollbar-width: none; -ms-overflow-style: none;
+}
+.seg::-webkit-scrollbar { display: none; }
+.seg-thumb {
+  position: absolute; top: 3px; bottom: 3px; left: 0; width: 0;
+  background: var(--accent); border-radius: 999px; z-index: 0;
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.seg-tab {
+  position: relative; z-index: 1; background: transparent; border: 0; color: var(--muted);
+  font: 650 12px/1.4 var(--sans); padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  white-space: nowrap; display: flex; align-items: center; gap: 6px;
+}
+.seg-tab[aria-selected="true"] { color: #07101f; }
+.seg-tab:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(91,156,255,0.35); }
+.seg-count {
+  font: 700 10.5px/1 var(--mono); font-variant-numeric: tabular-nums;
+  background: rgba(255,255,255,0.12); color: inherit; border-radius: 999px; padding: 1px 6px;
+}
+.seg-tab[aria-selected="true"] .seg-count { background: rgba(7,16,31,0.18); }
+.seg-count.zero { opacity: 0.55; }
+
 /* ---- New session popup (replaces the old top-of-board repo bar). ---- */
 .pop-backdrop {
   position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
@@ -294,6 +331,23 @@
    narrow Launch button it wrapped onto a second line. */
 #newSessionOpenBtn::before { content: "+ "; font-weight: 700; }
 .gobtn:hover { filter: brightness(1.06); }
+
+/* ---- Stats dashboard icon button + popup: the 4 header tiles used to sit
+   in an always-visible strip; they now live behind this button, reusing the
+   .pop* chrome from the New session popup so the two read as one system. ---- */
+.icon-btn {
+  margin-left: auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 9px; flex: none;
+  background: transparent; color: var(--muted); border: 1px solid var(--line); cursor: pointer;
+}
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+.icon-btn:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,156,255,0.25); }
+.icon-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); background: rgba(91,156,255,0.12); }
+.stats-pop { max-width: 360px; }
+.stats-pop .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px 14px; }
+.stats-pop .stat { text-align: left; }
+.stats-pop .stat .n { font-size: 22px; }
 
 /* ---- Top-bar quota meters (5h / 7d), two 40px conic rings. ---- */
 .m5 { display: flex; align-items: center; gap: 12px; }
@@ -559,6 +613,19 @@ header h1 .dot { filter: drop-shadow(0 0 6px var(--accent)); }
   50% { box-shadow: 0 0 0 6px rgba(255,138,92,0); }
 }
 
+/* Done-awaiting label: informational (a finished session, not a block on the
+   user), so it borrows the accent blue already used for the awaiting status
+   dot/card glow instead of the coral used for a genuine block, and never
+   pulses - pulsing is reserved for "act now". */
+.attention.done-attention {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+  animation: none;
+}
+.attention.done-attention:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+.attention.done-attention .att-dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+
 /* Focus-needed sessions: unmistakable animated glow ring, floated to the top by
    the existing STATUS_RANK sort. needs-permission is coral (--perm), not the
    amber it used to share with working. */
@@ -636,6 +703,7 @@ header h1 .dot { filter: drop-shadow(0 0 6px var(--accent)); }
   .deskfront[data-fx] .scr::after,
   .deskfront[data-alert],
   .room .threads .thread,
-  .confetti-layer i { animation: none !important; }
+  .confetti-layer i,
+  .seg-thumb { animation: none !important; }
   * { transition-duration: 0.01ms !important; }
 }
