@@ -128,10 +128,12 @@ common case.
 restart does not desync `tabIndex` from the real tab positions in a still-open managed window.
 
 Still pending (not code-complete):
-- **Live terminal validation on the real machine.** The `wt` launch/focus/`--resume` reattach and
-  the `SetForegroundWindow` nudge were only exercised in `CMC_DRY_RUN` mode plus a headless
-  serve-and-check; opening/focusing real Windows Terminal tabs must be confirmed by hand,
-  including whether the foreground nudge actually raises the window versus just flashing the
+- **Live focus/reattach validation on the real machine.** Launching is confirmed by hand
+  (2026-07-30): a real tab opened in the managed `cmc` window, hosted by
+  `powershell.exe -NoExit -Command "claude --name '<name>'"` with `claude.exe --name "<name>"`
+  as its child and the name as the tab title, and a named `POST /launch` reached the board as
+  `session.title`. Still unconfirmed by hand: `wt focus-tab`, the `claude --resume` reattach path,
+  and whether the `SetForegroundWindow` nudge really raises the window versus just flashing the
   taskbar icon.
 
 Landed 2026-07-19 (PRs #3, #4, #6, #8):

@@ -1,37 +1,69 @@
 # HANDOVER
 
 ## Date, branch, PR, CI
-- Date: 2026-07-19
-- Branch: `chore/session-close-repos-picker` (docs + this handover; being PR'd and merged into `main` at session close)
-- Open PRs: none (this session's #3, #4, #6, #8 are all merged)
-- CI: green on every merged PR; the docs PR runs the same `node --check` + smoke workflow
+- Date: 2026-07-30
+- Branch: `main` (this handover and a CLAUDE.md accuracy fix are committed straight to `main`, docs only)
+- PR: #12 merged (squash, `b448679`), branch deleted. No open PRs.
+- CI: green on #12 ("Fleet desktop MSI" release build for `fleet-v0.1.4` also succeeded)
+- Release: `fleet-v0.1.4` published with `Mission.Control.Center.0.1.4.msi` attached (111 MB)
 
 ## TLDR of session outcome
-Done (merged to `main`):
-- **Demo mode** (#1, PR #3): `public/demo.js` drives the whole UI through a looping fake fleet with no server, via `?demo=1`. `store.js` exposes `Store.ingest`. Real SSE path untouched without the flag.
-- **Backlog fixes** (#2, PR #4): `managedTabs` bounded-on-safe-reset cap; subagent-only sessions derive status from live children (`sawTopLevel`); blank model line hidden. Smoke 9/9.
-- **Cinematic office** (#5, PR #6): ambient life (breathing, plants, wall clock, day/night wash), per-tool desk FX, orchestrator + glowing threads, session-complete confetti, layout tuning. Vanilla CSS/SVG, reduced-motion gated. Eyeballed by Patrick at `?demo=1`, confirmed good.
-- **Deep repos picker** (PR #8): `~/repos` refactored into category folders whose descendants are the real projects; `terminal.listRepos()` now returns `{ root, tree }` (bounded folder tree, noise dirs excluded, capped 5 levels / 4000 nodes), and the New session bar cascades one dropdown per level (each defaults to "Not selected", launches in the deepest folder selected, or the root). Eyeballed, confirmed good.
+Done (merged to `main` in PR #12, shipped in `fleet-v0.1.4`):
+- **Fixed startup defaults for the Sessions board.** The Repos picker preselects `2-ZRM` > `customers`
+  (`DEFAULT_REPO_CHAIN` in `public/view-sessions.js`, matched by folder NAME, case-insensitive, falls
+  back to "Not selected" if absent). Show filters open on Active + Today. The three `fleetFlt*`
+  localStorage keys were REMOVED on purpose: a stale stored `all` silently overrode the default.
+- **The picker survives a Details round-trip.** `loadRepos()` no longer refetches `/repos` when a real
+  chain is already on screen, so drilling into a session and back stops wiping the selection.
+- **PowerShell-hosted terminal tabs.** Launch and Reopen now run
+  `powershell.exe -NoExit -Command <claude ...>` instead of making `claude` the tab's own process, so
+  the PS profile loads and the tab keeps a prompt plus scrollback after Claude exits.
+- **Named sessions.** Optional Name field in the New session bar (Enter launches too). The name is
+  sanitized by `sanitizeSessionName()` in `terminal.mjs`, then used as the WT tab title AND as
+  `claude --name '<name>'`. It reaches the board through the existing deferred join: `launchName` on
+  the `managedTabs` entry, returned by `terminal.bindSession()` on the first hook, written by
+  `applyLaunchName()` in `server.mjs` into the previously unused `session.title`, rendered as the card
+  heading (`.sc-name` + `has-name`) and prefixed in the drill-in breadcrumb.
+- **CI guard:** `scripts/smoke-server.mjs` now runs the server with `CMC_DRY_RUN=1` and asserts the
+  `/launch` command shape (with and without a name), so the quoting chain cannot regress silently.
 
-Not started (from the original plan / asks):
+Verified for real this session (not just dry-run): a live tab ran
+`powershell.exe -NoExit -Command "claude --name 'mcc quoting test'"` with `claude.exe --name
+"mcc quoting test"` as its child and the name as the WT tab title, and a named `POST /launch` showed
+up in the SSE snapshot as `"title":"board name test 2"`.
+
+Not started (carried over from previous sessions):
 - Dashboard glow-up (glass cards, token sparklines, attention rings, timeline strip).
+- patrickrobelweb web embed of the `?demo=1` showcase.
 - Humaaans CC-BY credit line + SKILL.md note.
-- **patrickrobelweb web embed** (part of the original "works in the webapp" ask): sync `public/**` into the Next.js site and iframe the `?demo=1` showcase.
 - Demo confetti beat (the demo loop ends on an error, so all-done confetti never fires).
 
 ## Prioritized next steps
-1. PatrickRobelWeb web embed (board #2): new `website/scripts/sync-mission-control.mjs` mirroring `sync-minigames.mjs`, copying `public/**` into `website/public/mission-control-demo/`, then iframe `/mission-control-demo/index.html?demo=1` on the `portfolio/mission-control-center` page. Decide public vs the existing password gate.
-2. Dashboard glow-up (pro lanes): glassmorphism/gradient cards, per-agent token sparklines, animated attention rings, a top fleet-activity timeline strip, refined dark mode.
-3. Add a demo confetti beat: one agent errors then recovers to `done`, so the all-done confetti fires in the showcase (`public/demo.js`).
-4. Add the visible "Characters: Humaaans by Pablo Stanley" CC-BY credit in the office UI; mention demo mode + assets in the skill's SKILL.md.
-5. Live terminal validation on the real machine (pre-existing pending: `wt` launch/focus/`--resume` + the `SetForegroundWindow` nudge, only tested in `CMC_DRY_RUN`). The new deep picker also makes launching into a nested project path worth a real-terminal check.
+1. Confirm the 0.1.4 in-app update actually installs from a REAL installed client (Fleet menu > check
+   for updates > Download & install). Only the release assets were verified this session.
+2. Validate the focus/reattach half of the terminal integration by hand: click a session card
+   (`wt focus-tab`), use the confirm-gated Reopen (`claude --resume` in a PowerShell tab), and judge
+   whether the `SetForegroundWindow` nudge really raises the window or just flashes the taskbar icon.
+3. Eyeball the new board visuals: named-session card heading, the Name field layout in the New session
+   bar at narrow widths, and `?demo=1` (demo `title`s now render as headings).
+4. patrickrobelweb web embed: new `website/scripts/sync-mission-control.mjs` mirroring
+   `sync-minigames.mjs`, copy `public/**` into `website/public/mission-control-demo/`, iframe
+   `/mission-control-demo/index.html?demo=1`. Decide public vs the existing password gate.
+5. Dashboard glow-up (pro lanes): glass/gradient cards, per-agent token sparklines, animated attention
+   rings, fleet-activity timeline strip.
+6. Add a demo confetti beat (one agent errors then recovers to `done`) in `public/demo.js`, plus the
+   visible "Characters: Humaaans by Pablo Stanley" CC-BY credit and a SKILL.md note.
 
 ## Verbatim resume commands (PowerShell first)
-Run the app / demo (open http://localhost:4317, or http://localhost:4317/?demo=1 for the offline showcase; Ctrl+C to stop):
+Start the app (installs hooks, starts the server, opens http://localhost:4317):
 ```
-cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node server.mjs
+cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node start.mjs
 ```
-Run the smoke test:
+Stop it again (removes hooks, stops the server, frees port 4317):
+```
+cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node stop.mjs
+```
+Run the smoke test (same checks as CI, includes the new `/launch` command-shape assertions):
 ```
 cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node scripts\smoke-server.mjs
 ```
@@ -39,20 +71,50 @@ Inspect the repos folder tree that feeds the New session picker (no server neede
 ```
 cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node --input-type=module -e "import { listRepos } from './terminal.mjs'; console.log(JSON.stringify(listRepos(), null, 2))"
 ```
+Print the exact `wt` commands a launch would run, without opening any tab:
+```
+cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; $env:CMC_DRY_RUN='1'; node --input-type=module -e "import { launchSession } from './terminal.mjs'; console.log(launchSession('C:/Users/pr/repos/2-ZRM/customers','customers','demo name').command)"; Remove-Item Env:CMC_DRY_RUN
+```
 
 ## Gotchas discovered this session
-- **server.mjs port is 4317**, override only with `--port <n>` (`CMC_PORT` is ignored). A stray `node server.mjs` from a serve-check keeps 4317 held; later curl checks then silently hit that stale process (new one gets EADDRINUSE). Find it: `netstat -ano | grep :4317`, confirm the command line is `node server.mjs`, kill by PID. Never kill the small Claude Code node processes.
-- To verify `listRepos()`/the picker, call it directly (see the resume command) instead of starting a server, so you never clash with a running instance or its lock file.
-- **Stacked branch on a squash-merge:** rebase only the new commits with `git rebase --onto origin/main <old-base-sha> <branch>`; a plain rebase/merge re-conflicts on the already-squashed changes.
-- `/repos` now returns `{ root, tree }` (was a flat array). The smoke assertion was updated to match; any future consumer must read `.tree`.
-- `listRepos()` excludes dot-folders and a noise denylist (`node_modules`, `dist`, `.git`, ...) so the cascade stays project-shaped; add to `REPO_TREE_SKIP` in `terminal.mjs` if a noise folder slips through.
-- Co-dev gate: first edit in a session needs a `<session_id> use` line appended (never overwrite) to `.claude/.codev-ack` (gitignored, one line per session).
+- **`claude` has a `-n/--name <name>` flag** (verified on 2.1.220): "Set a display name for this
+  session (shown in the prompt box, /resume picker, and terminal title)". That is why naming needed no
+  `/rename` keystroke injection. `/rename` still exists for renaming inside a running session; there is
+  no way to push a name into a live session from outside.
+- **`start.mjs` is idempotent and will NOT restart a server that is already running.** If an older
+  server process holds the lock, your new code is not being served (this bit once: a `/launch` came back
+  with the old bare-`claude` command). Run `node stop.mjs` then `node start.mjs` after changing
+  server-side code.
+- **Quoting chain for launched tabs:** `spawn('cmd', ['/c','start','','wt', ...])` -> `wt` -> `powershell
+  -Command`. It works, but only because `sanitizeSessionName()` strips `" \` ; & | < >` and a trailing
+  backslash; `'` inside the name is escaped by doubling it for PowerShell. Do not pass raw user text
+  into those args.
+- **`git branch -d` refuses squash-merged branches** ("not fully merged") since their commits are not
+  ancestors of `main`. Confirm with `git diff <branch> main --stat` (only the newer PR's files should
+  appear) and then use `-D`.
+- **`gh` has two accounts here and defaults to `przrm`.** Pushing to `patr7257/MissionControlCenter`
+  fails with a 403 until `gh auth switch --hostname github.com --user patr7257`; switch back to `przrm`
+  afterwards, since it is global gh state.
+- Killing processes (`Stop-Process`) is blocked by the permission classifier in this setup, so stray
+  test terminal tabs have to be closed by hand.
+- `session.title` was a fully plumbed but never-written field (server shape, `serializeSession`,
+  persistence, UI fallback). Named sessions just fill it, which is why no new endpoint or schema change
+  was needed.
 
 ## Open decisions waiting on Patrick
+- Does the 0.1.4 in-app update install cleanly from your installed client (yes/no)?
+- Keep `DEFAULT_REPO_CHAIN` hardcoded to `2-ZRM` > `customers`, or make it configurable later if you
+  start a lot of sessions elsewhere?
 - patrickrobelweb portfolio demo: keep the existing password gating, or make the showcase public?
-- Continue with the dashboard glow-up and the web embed in a future session (both unstarted)?
+- Pick up the dashboard glow-up next, or the web embed?
 
 ## Environment state
-- All dev servers stopped (the 4317 verify server was killed); no listeners on 431x. Docker not running.
-- No worktrees (this session's picker work was done on branches in the main checkout). All feature branches merged and deleted local + remote. `main` synced.
-- Only `chore/session-close-repos-picker` remains, carrying this handover + the CLAUDE.md update, pending merge.
+- Dev server stopped (`node stop.mjs`, removed 9 hook groups); nothing listening on 4317. Docker not
+  running. No scheduled cron jobs, keep-awake not active.
+- Three stray Windows Terminal test tabs from this session's live verification may still be open
+  ("mcc quoting test", "board name test", "board name test 2"). Process kill was denied, so close those
+  tabs by hand; their cards age off the board on their own.
+- `main` synced with origin; PR #12's branch deleted local and remote; stale
+  `rename/repo-to-missioncontrolcenter` deleted after confirming its content is in `main`. No worktrees.
+- The packaged MSI install keeps its own copy of the backend, so an installed app only picks up this
+  session's changes after upgrading to `fleet-v0.1.4`.
