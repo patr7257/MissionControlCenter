@@ -37,3 +37,16 @@ jobs:
 
       - name: Server smoke test
         run: node scripts/smoke-server.mjs
+
+      # Packaging guard: every local module main.mjs imports must be covered by
+      # electron-builder's `files` list. 0.1.10 shipped dead without this because
+      # a new module was imported but never packaged, and nothing else notices:
+      # the repo copy works, and an MSI only fails at runtime after release.
+      - name: Desktop packaging check
+        run: node scripts/check-desktop-package.mjs
+
+      # Real spawn of the updater's install command (this runner is Windows, so it
+      # executes rather than skipping): asserts the MSI path reaches msiexec
+      # unmangled by Node's and cmd.exe's quoting rules.
+      - name: Updater install command check
+        run: node scripts/check-installer-launch.mjs

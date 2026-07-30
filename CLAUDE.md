@@ -349,7 +349,14 @@ silently ends up back on the shared HTTPS credential path.
   ingestion, statusline ingestion, registry reconciliation and launch command shapes. Runs in CI.
 - `node scripts/check-installer-launch.mjs` - spawns the updater's real install command with a
   stand-in for msiexec and asserts the MSI path arrives unmangled. Windows only (it is Windows
-  quoting under test), SKIPS with exit 0 elsewhere, and runs in the MSI workflow's Windows job.
+  quoting under test) and SKIPS with exit 0 elsewhere, but CI runs on `windows-latest`, so it really
+  executes there as well as in the MSI workflow.
+- `node scripts/check-desktop-package.mjs` - static check that every local module reachable from
+  `desktop/main.mjs` (plus `preload.cjs` and the `package.json` `main` entry) is matched by
+  `desktop/electron-builder.yml`'s `files` globs. This is the ONLY check that can catch a packaging
+  omission before a release: the repo copy runs fine with the file present, and a mis-packaged MSI
+  only fails at runtime on the user's machine. 0.1.10 shipped dead exactly that way. No Electron and
+  no build, so it is cheap and runs in CI.
 - `node scripts/render-check.mjs` - drives a REAL Chromium over the Chrome DevTools Protocol using
   Node's built-in global `WebSocket` (no dependencies, nothing installed), asserting card geometry
   across viewport widths, the filters, the popup and the account picker, and collecting console
@@ -472,10 +479,12 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
 
 ## CI
 `.github/workflows/ci.yml` runs on PRs and pushes to `main` (separate from the release MSI
-builder). It `node --check`s every `*.mjs` in the repo and boots the server via
-`scripts/smoke-server.mjs` (hermetic temp HOME, checks `/`, `/repos`, `/stream`, one hook event).
-Zero-dependency, so there is nothing to install. `scripts/smoke-server.mjs` also runs locally:
-`node scripts/smoke-server.mjs`.
+builder), on `windows-latest`, which matters: the Windows-only checks below really execute in CI
+rather than skipping. It `node --check`s every `*.mjs` in the repo, boots the server via
+`scripts/smoke-server.mjs` (hermetic temp HOME, checks `/`, `/repos`, `/stream`, one hook event),
+then runs `scripts/check-desktop-package.mjs` (packaging omissions) and
+`scripts/check-installer-launch.mjs` (the updater's install command). Zero-dependency, so there is
+nothing to install, and all four run locally too.
 
 ## Docs
 - `docs/plans/` - implementation plans.
