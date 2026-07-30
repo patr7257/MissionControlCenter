@@ -272,7 +272,7 @@
         '<span class="sc-acts">' +
           '<button type="button" class="sc-details">Details</button>' +
           '<button type="button" class="sc-resume prim" style="display:none">Resume</button>' +
-          '<button type="button" class="sc-reopen">Reopen</button>' +
+          '<button type="button" class="sc-reopen">Take Control</button>' +
         '</span>' +
       '</div>';
     el.classList.add('enter');
@@ -340,10 +340,12 @@
   }
 
   // Shared reattach call: opens a brand new terminal tab and resumes into it
-  // with `claude --resume`. Reopen gates this behind a confirm dialog (it is
-  // only reachable once an active session's focus attempt has come back
-  // unmanaged); Resume does not (resuming a CLOSED session is the intended
-  // action, there is no duplicate-tab risk since nothing else could be open).
+  // with `claude --resume`, which is what actually hands control of the session
+  // back to a terminal this app owns. Take Control gates this behind a confirm
+  // (it is only reachable once an active session's focus attempt has come back
+  // unmanaged, so the old terminal MIGHT still be alive somewhere); Resume does
+  // not (resuming a CLOSED session is the intended action, there is no
+  // duplicate-tab risk since nothing else could be open).
   function doReopen(c) {
     return fetch('/reopen', {
       method: 'POST',
@@ -351,19 +353,94 @@
       body: JSON.stringify({ sessionId: c._id })
     }).then(function (res) { return res.json(); }).then(function (data) {
       if (!data || data.ok === false) {
-        showToast('Could not reopen that terminal.');
+        // The server explains itself when it can (an unlaunchable path, no known
+        // cwd); fall back to a generic line rather than swallowing the reason.
+        showToast((data && data.error) ? String(data.error) : 'Could not open a terminal for that session.');
       } else {
         c.el.classList.remove('unmanaged');
+        showToast('Took control of ' + (c._title || 'that session') + ' in a new tab.');
       }
     }).catch(function () {
-      showToast('Could not reach the server to reopen that terminal.');
+      showToast('Could not reach the server to open that terminal.');
     });
   }
   function reopenCard(c) {
-    if (!window.confirm('Open a new terminal tab for this session? Use this only if the old terminal window is gone.')) return;
-    doReopen(c);
+    showConfirm({
+      title: 'Take Control',
+      html: 'Open a new terminal tab and resume <b></b> there, under this app\'s control.' +
+        '<span class="note">Mission Control cannot see a terminal for this session, so it cannot bring one to the front. ' +
+        'Use this when the original window is gone; if it is still open somewhere, the session ends up in two tabs.</span>',
+      name: c._title || 'this session',
+      path: c._cwd || '',
+      confirmLabel: 'Take Control',
+      opener: c.reopen
+    }, function () { doReopen(c); });
   }
   function resumeCard(c) { doReopen(c); }
+
+  // ---- In-app confirm (markup in index.html). window.confirm() cannot be
+  // styled at all, and in the Electron shell it renders as a bare OS dialog
+  // titled "Mission Control Center", which reads like a system error rather than
+  // an app decision. Esc and the backdrop cancel, Enter confirms, focus moves to
+  // the confirm button and back to the opener on close. One dialog element is
+  // reused, so opening it always rebinds the handlers. ----
+  var confirmState = null;
+  function showConfirm(opts, onConfirm) {
+    var backdrop = document.getElementById('confirmBackdrop');
+    var titleEl = document.getElementById('confirmTitle');
+    var textEl = document.getElementById('confirmText');
+    var pathEl = document.getElementById('confirmPath');
+    var okBtn = document.getElementById('confirmOkBtn');
+    // No dialog in the DOM (an embedded/older shell): do the thing rather than
+    // silently dropping the action.
+    if (!backdrop || !textEl || !okBtn) { onConfirm(); return; }
+    if (titleEl) titleEl.textContent = opts.title || 'Confirm';
+    textEl.innerHTML = opts.html || '';
+    // The session name is the one untrusted string here, so it is written as
+    // text into the placeholder rather than interpolated into the HTML above.
+    var nameSlot = textEl.querySelector('b');
+    if (nameSlot) nameSlot.textContent = opts.name || '';
+    if (pathEl) pathEl.textContent = opts.path || '';
+    okBtn.textContent = opts.confirmLabel || 'Confirm';
+    confirmState = { onConfirm: onConfirm, opener: opts.opener || null };
+    backdrop.style.display = 'flex';
+    okBtn.focus();
+    document.addEventListener('keydown', onConfirmKeydown);
+  }
+  function closeConfirm() {
+    var backdrop = document.getElementById('confirmBackdrop');
+    if (backdrop) backdrop.style.display = 'none';
+    document.removeEventListener('keydown', onConfirmKeydown);
+    var opener = confirmState && confirmState.opener;
+    confirmState = null;
+    if (opener && opener.offsetParent !== null) opener.focus();
+  }
+  function onConfirmKeydown(e) {
+    if (e.key === 'Escape') { e.preventDefault(); closeConfirm(); }
+    else if (e.key === 'Enter') {
+      // Enter on a focused Cancel means cancel: let the button's own default win.
+      if (e.target === document.getElementById('confirmCancelBtn')) return;
+      e.preventDefault();
+      acceptConfirm();
+    }
+  }
+  function acceptConfirm() {
+    var state = confirmState;
+    closeConfirm();
+    if (state && state.onConfirm) state.onConfirm();
+  }
+  function initConfirmPopup() {
+    var okBtn = document.getElementById('confirmOkBtn');
+    if (!okBtn || okBtn._wired) return;
+    okBtn._wired = true;
+    okBtn.addEventListener('click', acceptConfirm);
+    var cancelBtn = document.getElementById('confirmCancelBtn');
+    if (cancelBtn) cancelBtn.addEventListener('click', closeConfirm);
+    var backdrop = document.getElementById('confirmBackdrop');
+    if (backdrop) {
+      backdrop.addEventListener('click', function (e) { if (e.target === backdrop) closeConfirm(); });
+    }
+  }
 
   var toastEl = null;
   var toastTimer = null;
@@ -396,6 +473,9 @@
     var named = !!s.title;
     var title = s.title || s.project || '(unknown project)';
     if (c._title !== title) { c.title.textContent = title; c._title = title; }
+    // Kept for the Take Control confirm, which names the session and shows its
+    // folder rather than asking about "this session" in the abstract.
+    c._cwd = s.cwd || '';
     // The line underneath never repeats the heading: an unnamed card is
     // already titled with its project, so it shows the branch alone. Only a
     // named card needs the project spelled out again.
@@ -847,6 +927,7 @@
   Store.onTick(updateUsageMeters);
   Store.onUsage(updateUsageMeters);
   initNewSessionPopup();
+  initConfirmPopup();
 
   window.ViewSessions = {
     id: 'sessions',

@@ -73,6 +73,25 @@
     </div>
   </div>
 
+  <!-- In-app confirm. Replaces window.confirm(), whose native chrome ignores the
+       app's own styling entirely (and in the Electron shell renders as a bare OS
+       dialog titled "Mission Control Center"). Reuses the .pop-backdrop / .pop
+       shell so it matches the New session modal; the visibility lives on the
+       backdrop, never on the panel. -->
+  <div class="pop-backdrop" id="confirmBackdrop" style="display:none">
+    <div class="pop pop-sm" id="confirmPopup" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmText">
+      <div class="pop-head"><b id="confirmTitle">Take Control</b><span>esc to cancel</span></div>
+      <div class="pop-body">
+        <p class="pop-text" id="confirmText"></p>
+      </div>
+      <div class="pop-foot">
+        <span class="path" id="confirmPath"></span>
+        <button id="confirmCancelBtn" class="ghostbtn" type="button">Cancel</button>
+        <button id="confirmOkBtn" class="gobtn" type="button">Take Control</button>
+      </div>
+    </div>
+  </div>
+
   <div id="viewSessions" class="view active">
     <div class="filter-bar" id="filterBar">
       <label class="flt-label" for="fltState">Show:</label>

@@ -72,19 +72,37 @@ export function resolveAccount(key) {
   return GH_ACCOUNTS.find((a) => a.key === key) || null;
 }
 
-// Env-export prefix applied to the hosted PowerShell command so the account
-// only ever applies to that one tab. Git identity vars are set alongside
+// Env exports prepended to the hosted PowerShell script so the account only
+// ever applies to that one tab. Git identity vars are set alongside
 // GH_CONFIG_DIR on purpose: without them a session overridden to one account
 // would still commit as whatever the shared global git identity is.
-function ghEnvPrefix(account) {
-  if (!account) return '';
-  return (
-    '$env:GH_CONFIG_DIR=' + psQuote(account.configDir) + '; ' +
-    '$env:GIT_AUTHOR_NAME=' + psQuote(account.name) + '; ' +
-    '$env:GIT_AUTHOR_EMAIL=' + psQuote(account.email) + '; ' +
-    '$env:GIT_COMMITTER_NAME=' + psQuote(account.name) + '; ' +
-    '$env:GIT_COMMITTER_EMAIL=' + psQuote(account.email) + '; '
-  );
+// Returns STATEMENTS, one per line, never a `; `-joined string: a semicolon in
+// a wt argument splits the command line (see spawnWt below).
+function ghEnvStatements(account) {
+  if (!account) return [];
+  return [
+    '$env:GH_CONFIG_DIR=' + psQuote(account.configDir),
+    '$env:GIT_AUTHOR_NAME=' + psQuote(account.name),
+    '$env:GIT_AUTHOR_EMAIL=' + psQuote(account.email),
+    '$env:GIT_COMMITTER_NAME=' + psQuote(account.name),
+    '$env:GIT_COMMITTER_EMAIL=' + psQuote(account.email),
+  ];
+}
+
+// Statements are separated by newlines rather than `; ` for the same reason.
+function psScript(statements) {
+  return statements.join('\n');
+}
+
+// PowerShell's own transport for a script that must survive an unfriendly
+// command line: base64 of UTF-16LE (what powershell.exe -EncodedCommand
+// expects). The encoded payload contains only base64 characters, so it has no
+// semicolon for wt to split on, no space or quote for cmd/wt to regroup, and
+// no non-ASCII byte for a console codepage to mangle (the git identity carries
+// 'Røbel'). Exported so tests can decode the command that really runs instead
+// of asserting on a prettified copy of it.
+export function encodePsCommand(script) {
+  return Buffer.from(String(script), 'utf16le').toString('base64');
 }
 
 // Soft cap for managedTabs (see the growth comment below). Once the array
@@ -196,8 +214,36 @@ function buildReadableCommand(args, quotedIndexes) {
 }
 
 // Fire-and-forget launch of wt.exe via cmd start, detached so Node never blocks.
+//
+// LOAD-BEARING INVARIANT: no argument here may contain a raw `;`. Windows
+// Terminal uses `;` as its own command separator and splits on it even inside a
+// single quoted argument, so a semicolon-joined PowerShell command does not run
+// as one command: wt turns every `; ...` segment into ANOTHER tab whose
+// "executable" is the segment text, which fails with 0x80070002 (file not
+// found) while the first tab runs only the fragment before the first `;`. That
+// is exactly what a `$env:X='a'; $env:Y='b'; claude` prefix produced: four junk
+// error tabs plus a tab that set one variable and never started Claude. Hence
+// -EncodedCommand (see encodePsCommand) rather than -Command, and hence
+// sanitizeSessionName stripping `;` from user input. Asserted in
+// scripts/smoke-server.mjs.
 function spawnWt(args) {
   spawn('cmd', ['/c', 'start', '', 'wt', ...args], { detached: true, stdio: 'ignore' }).unref();
+}
+
+// Enforces the spawnWt invariant above at runtime instead of trusting every
+// caller to have sanitized its inputs. The repo path is the one value that is
+// neither sanitized (it must stay a usable directory) nor encoded, so a folder
+// literally named 'a;b' would still split the wt command line. Refusing with a
+// clear error beats spawning the junk tabs this fix exists to remove.
+function firstSemicolonArg(args) {
+  return args.find((a) => String(a).includes(';')) || null;
+}
+
+function semicolonError(arg) {
+  return (
+    'Cannot launch: "' + arg + '" contains a semicolon, which Windows Terminal ' +
+    'treats as a command separator. Rename the folder or the session.'
+  );
 }
 
 // A user-supplied session name has to survive the cmd start -> wt -> powershell
@@ -217,13 +263,13 @@ export function sanitizeSessionName(name) {
 // that loads the developer's PowerShell profile and leaves a usable prompt (with
 // the scrollback intact) when Claude exits, instead of the tab vanishing.
 // Single quotes are the PowerShell literal form, so a `'` inside the name is
-// escaped by doubling it. `account`, when given, is prefixed as env exports
-// (GH_CONFIG_DIR plus the four git identity vars) so the account applies only
-// to this one tab; see ghEnvPrefix above.
-function psClaudeCommand(name, account) {
-  const prefix = ghEnvPrefix(account);
-  if (!name) return prefix + 'claude';
-  return prefix + "claude --name '" + name.replace(/'/g, "''") + "'";
+// escaped by doubling it. `account`, when given, contributes the leading env
+// exports (GH_CONFIG_DIR plus the four git identity vars) so the account applies
+// only to this one tab; see ghEnvStatements above. Returns the plain script text
+// (newline separated); encodePsCommand is what puts it on a wt command line.
+function psClaudeScript(name, account) {
+  const claude = name ? "claude --name '" + name.replace(/'/g, "''") + "'" : 'claude';
+  return psScript([...ghEnvStatements(account), claude]);
 }
 
 // Synchronous check: is any WindowsTerminal.exe process running at all? Fails
@@ -368,30 +414,40 @@ export function launchSession(repoPath, title, name, accountKey) {
     clearStaleManagedTabsIfWindowGone();
     const account = resolveAccount(accountKey) || defaultAccountForPath(repoPath);
     const launchName = sanitizeSessionName(name);
-    const tabTitle = launchName || title;
-    const psCommand = psClaudeCommand(launchName, account);
+    // The fallback title is a folder name (or anything a caller sent), so it
+    // goes through the same sanitizer as a typed name: it lands on the wt
+    // command line as --title and is what bringToForeground() matches on.
+    const tabTitle = launchName || sanitizeSessionName(title) || 'claude';
+    const script = psClaudeScript(launchName, account);
     const args = [
       '-w', WT_WINDOW, 'nt', '-d', repoPath, '--title', tabTitle,
-      'powershell.exe', '-NoExit', '-Command', psCommand,
+      'powershell.exe', '-NoExit', '-EncodedCommand', encodePsCommand(script),
     ];
-    // Quote the repoPath (index 4), title (index 6) and the PowerShell command
-    // (index 10): the values that may contain spaces. Everything else stays bare
-    // for readability.
-    const command = buildReadableCommand(args, new Set([4, 6, 10]));
+    // Quote the repoPath (index 4) and title (index 6): the values that may
+    // contain spaces. Everything else, including the base64 payload at index 10,
+    // stays bare for readability (base64 needs no quoting, and quoting it would
+    // suggest the payload could contain something that does).
+    const command = buildReadableCommand(args, new Set([4, 6]));
+    const offender = firstSemicolonArg(args);
+    if (offender) return { ok: false, error: semicolonError(offender) };
     const tabIndex = managedTabs.length;
     const entry = { sessionId: null, cwd: repoPath, title: tabTitle, launchName, launchedAt: Date.now(), tabIndex };
 
+    // `script` is the decoded payload of `command`, returned so a log or a test
+    // can read what the tab actually runs without decoding base64 by hand.
+    // `command` still reflects the REAL args, so a dry run cannot look right
+    // while the live command differs.
     if (process.env.CMC_DRY_RUN) {
       managedTabs.push(entry);
       enforceManagedTabsCap();
-      return { ok: true, command, account: account.login, dryRun: true };
+      return { ok: true, command, script, account: account.login, dryRun: true };
     }
 
     spawnWt(args);
     managedTabs.push(entry);
     saveManagedTabs();
     enforceManagedTabsCap();
-    return { ok: true, command, account: account.login };
+    return { ok: true, command, script, account: account.login };
   } catch (error) {
     return { ok: false, error: String(error) };
   }
@@ -463,15 +519,6 @@ export function reopenSession(sessionId, cwd, title) {
       return { ok: false, mode: 'unmanaged', error: 'No known working directory for this session' };
     }
 
-    // Any prior entries bound to this session now point at a tab we are about
-    // to replace: null them out so a future focus resolves to the fresh tab
-    // instead of the stale one. Entries are never removed, since tabIndex is
-    // each entry's position in managedTabs and removing one would desync every
-    // later index from its real tab.
-    for (const tab of managedTabs) {
-      if (tab.sessionId === sessionId) tab.sessionId = null;
-    }
-
     // --title lets bringToForeground() find the right window afterwards by
     // its active tab title.
     const sanitizedTitle = sanitizeSessionName(title);
@@ -483,21 +530,36 @@ export function reopenSession(sessionId, cwd, title) {
     // PowerShell hosts the tab for the same reasons as launchSession (profile
     // loads, the tab survives Claude exiting). No --name here: the resumed
     // session already carries whatever display name it was given.
+    const script = psScript([...ghEnvStatements(account), 'claude --resume ' + sessionId]);
     const args = [
       '-w', WT_WINDOW, 'nt', '-d', cwd, '--title', tabTitle,
-      'powershell.exe', '-NoExit', '-Command', ghEnvPrefix(account) + 'claude --resume ' + sessionId,
+      'powershell.exe', '-NoExit', '-EncodedCommand', encodePsCommand(script),
     ];
-    // Quote the cwd (index 4), title (index 6) and the PowerShell command
-    // (index 10): the values that may contain spaces. Everything else, including
-    // the sessionId inside that command, stays bare.
-    const command = buildReadableCommand(args, new Set([4, 6, 10]));
+    // Quote the cwd (index 4) and title (index 6): the values that may contain
+    // spaces. Everything else, including the base64 payload at index 10 that
+    // carries the sessionId, stays bare.
+    const command = buildReadableCommand(args, new Set([4, 6]));
+    const offender = firstSemicolonArg(args);
+    if (offender) return { ok: false, error: semicolonError(offender) };
+
+    // Any prior entries bound to this session now point at a tab we are about
+    // to replace: null them out so a future focus resolves to the fresh tab
+    // instead of the stale one. Entries are never removed, since tabIndex is
+    // each entry's position in managedTabs and removing one would desync every
+    // later index from its real tab. Done only once the reattach is certain to
+    // proceed, so a refused reopen leaves the existing binding alone.
+    for (const tab of managedTabs) {
+      if (tab.sessionId === sessionId) tab.sessionId = null;
+    }
+
     const tabIndex = managedTabs.length;
     const entry = { sessionId, cwd, title: tabTitle, launchName: '', launchedAt: Date.now(), tabIndex };
 
+    // `script` mirrors launchSession: the decoded payload of `command`.
     if (process.env.CMC_DRY_RUN) {
       managedTabs.push(entry);
       enforceManagedTabsCap();
-      return { ok: true, mode: 'reattached', command, account: account.login, dryRun: true };
+      return { ok: true, mode: 'reattached', command, script, account: account.login, dryRun: true };
     }
 
     spawnWt(args);
@@ -505,7 +567,7 @@ export function reopenSession(sessionId, cwd, title) {
     saveManagedTabs();
     enforceManagedTabsCap();
     bringToForeground(tabTitle);
-    return { ok: true, mode: 'reattached', command, account: account.login };
+    return { ok: true, mode: 'reattached', command, script, account: account.login };
   } catch (error) {
     return { ok: false, error: String(error) };
   }

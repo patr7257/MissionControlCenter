@@ -113,13 +113,31 @@ try {
       reposBody.accounts.every((a) => !('configDir' in a))
   );
 
+  // The PowerShell script the tab runs never appears literally on the wt
+  // command line any more: it travels as a base64 -EncodedCommand payload,
+  // because wt treats `;` as its own command separator even inside a quoted
+  // argument and used to turn each `$env:X='y'; ` statement into a junk tab.
+  // So decode what really runs, rather than asserting on a readable copy.
+  function decodedScript(result) {
+    if (!result || typeof result.command !== 'string') return '';
+    const match = /-EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(result.command);
+    if (!match) return '';
+    return Buffer.from(match[1], 'base64').toString('utf16le');
+  }
+
+  // The regression assertion for this whole mechanism: not one generated wt
+  // argument may carry a raw semicolon.
+  function hasNoSemicolon(result) {
+    return Boolean(result) && typeof result.command === 'string' && !result.command.includes(';');
+  }
+
   // GH_CONFIG_DIR plus the four git identity vars must precede `claude` in the
-  // generated command, whichever account it resolved to.
-  function hasGhEnvPrefix(command) {
+  // decoded script, whichever account it resolved to, one statement per line.
+  function hasGhEnvPrefix(script) {
     return (
-      typeof command === 'string' &&
-      /\$env:GH_CONFIG_DIR='[^']*';\s*\$env:GIT_AUTHOR_NAME='[^']*';\s*\$env:GIT_AUTHOR_EMAIL='[^']*';\s*\$env:GIT_COMMITTER_NAME='[^']*';\s*\$env:GIT_COMMITTER_EMAIL='[^']*';\s*claude/.test(
-        command
+      typeof script === 'string' &&
+      /^\$env:GH_CONFIG_DIR='[^']*'\n\$env:GIT_AUTHOR_NAME='[^']*'\n\$env:GIT_AUTHOR_EMAIL='[^']*'\n\$env:GIT_COMMITTER_NAME='[^']*'\n\$env:GIT_COMMITTER_EMAIL='[^']*'\nclaude/.test(
+        script
       )
     );
   }
@@ -133,25 +151,59 @@ try {
     body: JSON.stringify({ repo: 'C:/tmp/smoke-repo', title: 'smoke name', name: 'smoke name' }),
   })).json();
   check('POST /launch succeeds', launchNamed && launchNamed.ok === true);
+  const namedScript = decodedScript(launchNamed);
   check(
-    'POST /launch hosts the tab in PowerShell and passes the name to claude --name',
+    'POST /launch hosts the tab in PowerShell via a base64 -EncodedCommand payload',
     launchNamed &&
       typeof launchNamed.command === 'string' &&
       launchNamed.command.includes('--title "smoke name"') &&
-      launchNamed.command.includes('claude --name \'smoke name\'"') &&
-      launchNamed.command.includes('powershell.exe -NoExit -Command "$env:GH_CONFIG_DIR')
+      launchNamed.command.includes('powershell.exe -NoExit -EncodedCommand ') &&
+      namedScript.length > 0
   );
+  check(
+    'POST /launch passes the name to claude --name inside the encoded payload',
+    namedScript.endsWith("claude --name 'smoke name'")
+  );
+  check(
+    'POST /launch returns the decoded payload as `script` so it matches what runs',
+    launchNamed && launchNamed.script === namedScript
+  );
+  check('POST /launch generates no wt argument containing a semicolon', hasNoSemicolon(launchNamed));
   check('POST /launch under a non-2-ZRM path resolves to the personal account', launchNamed && launchNamed.account === 'patr7257');
-  check('POST /launch sets GH_CONFIG_DIR and the four git identity vars before claude', hasGhEnvPrefix(launchNamed.command));
+  check('POST /launch sets GH_CONFIG_DIR and the four git identity vars before claude', hasGhEnvPrefix(namedScript));
 
   const launchPlain = await (await fetch(`${BASE}/launch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ repo: 'C:/tmp/smoke-repo', title: 'smoke-repo' }),
   })).json();
+  const plainScript = decodedScript(launchPlain);
   check(
     'POST /launch without a name runs bare claude under PowerShell, prefixed with the account env vars',
-    launchPlain && launchPlain.command && launchPlain.command.endsWith('claude"') && hasGhEnvPrefix(launchPlain.command)
+    plainScript.endsWith('\nclaude') && hasGhEnvPrefix(plainScript) && hasNoSemicolon(launchPlain)
+  );
+
+  // A semicolon in a value we cannot sanitize away (the repo path must stay a
+  // usable directory) is refused outright rather than splitting the wt command
+  // line into junk tabs. A semicolon in the TITLE is sanitized instead, so it
+  // launches normally.
+  const launchSemicolonPath = await (await fetch(`${BASE}/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: 'C:/tmp/smoke;repo', title: 'semicolon path' }),
+  })).json();
+  check(
+    'POST /launch refuses a repo path containing a semicolon instead of spawning junk tabs',
+    launchSemicolonPath && launchSemicolonPath.ok === false && /semicolon/i.test(String(launchSemicolonPath.error))
+  );
+  const launchSemicolonTitle = await (await fetch(`${BASE}/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: 'C:/tmp/smoke-repo', title: 'bad;title' }),
+  })).json();
+  check(
+    'POST /launch sanitizes a semicolon out of the tab title and still launches',
+    launchSemicolonTitle && launchSemicolonTitle.ok === true && hasNoSemicolon(launchSemicolonTitle)
   );
 
   // Path-based account resolution: a repo under a 2-ZRM segment resolves to
@@ -194,7 +246,10 @@ try {
   );
   check(
     'POST /launch with a garbage account value never lets it reach the command string',
-    launchGarbageAccount && typeof launchGarbageAccount.command === 'string' && !launchGarbageAccount.command.includes("rm -rf")
+    launchGarbageAccount &&
+      typeof launchGarbageAccount.command === 'string' &&
+      !launchGarbageAccount.command.includes('rm -rf') &&
+      !decodedScript(launchGarbageAccount).includes('rm -rf')
   );
 
   await fetch(`${BASE}/event`, {
@@ -208,6 +263,20 @@ try {
   check('ingested session appears in snapshot', snap && snap.sessions.some((s) => s.id === 'smoke-1'));
   const smoke1 = snap && snap.sessions.find((s) => s.id === 'smoke-1');
   check('no-model SessionStart serializes model as null', smoke1 && smoke1.model === null);
+
+  // Reopen/resume builds its command the same way as a launch, so it carries the
+  // same semicolon hazard and must pass the same assertions. Needs a known
+  // session (its cwd comes from the server's own record), hence running here
+  // rather than next to the /launch checks.
+  const reopened = await (await fetch(`${BASE}/reopen`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-1' }),
+  })).json();
+  const reopenScript = decodedScript(reopened);
+  check('POST /reopen reattaches with claude --resume in an encoded payload', reopened && reopened.ok === true && reopened.mode === 'reattached' && reopenScript.endsWith('claude --resume smoke-1'));
+  check('POST /reopen sets the account env vars before claude --resume', hasGhEnvPrefix(reopenScript));
+  check('POST /reopen generates no wt argument containing a semicolon', hasNoSemicolon(reopened));
 
   // Subagent-only session: a session that never gets a top-level hook (no
   // SessionStart/UserPromptSubmit of its own) must not sit on the 'working'
