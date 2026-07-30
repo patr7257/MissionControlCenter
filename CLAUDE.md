@@ -72,10 +72,24 @@ Notification / SessionEnd) that fire for every session, plus a backfill scan of
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`, `~/.claude/history.jsonl`, and live-status
 signals from `~/.claude/ide/*.lock`. Terminal launch/focus uses Windows Terminal
 (`wt -w cmc ...` for a managed window; `claude --resume <id>` to reattach). Every tab is hosted by
-`powershell.exe -NoExit -Command <claude ...>` rather than running `claude` as the tab's own
+`powershell.exe -NoExit -EncodedCommand <base64>` rather than running `claude` as the tab's own
 process, so the developer's PowerShell profile loads and the tab survives Claude exiting (prompt
 plus scrollback intact) instead of vanishing. Session labels derive from project + branch + last
 prompt, unless the session was named at launch (see "Named sessions" below).
+
+**The `wt` semicolon trap, do not undo `-EncodedCommand` (fixed 2026-07-30, issue #16).** Windows
+Terminal uses `;` as its own command separator and splits on it EVEN INSIDE a single quoted
+argument. A `-Command "$env:GH_CONFIG_DIR='...'; $env:GIT_AUTHOR_NAME='...'; claude"` string was
+therefore not one command: the first tab ran only the fragment before the first `;` (it set one
+variable and never started Claude) and every later `; ...` segment became ANOTHER tab whose
+"executable" was the segment text, failing with `0x80070002` (file not found). That is the four junk
+error tabs per launch that this fix removes. So the hosted script is now built one statement per
+line and travels as base64 UTF-16LE (`encodePsCommand()`), whose alphabet contains no `;`, no space
+and no quote, which also sidesteps the console codepage mangling the `Røbel` in the git identity
+vars. `spawnWt()` documents the invariant, `firstSemicolonArg()` enforces it at runtime for the one
+value that cannot be sanitized (the repo path: a folder named `a;b` is refused with a clear error
+instead of spawning junk), tab titles go through `sanitizeSessionName()` (which strips `;`), and
+`scripts/smoke-server.mjs` asserts no generated `wt` argument ever contains one.
 
 Status: implemented and reviewed across four phases (server sessions model + discovery/backfill +
 session hooks; `view-sessions.js` Sessions board with per-session drill-in; `terminal.mjs` launch/
@@ -96,15 +110,17 @@ bound to the session but exactly one unbound tab (`sessionId === null`) matches 
 (via the realpath-aware `normalizePath`), that tab is adopted and focused; with zero or 2+
 candidates it falls through to unmanaged rather than guess. The frontend shows a toast ("Terminal
 not managed by mission control.") for the unmanaged case and never throws a visible error either
-way; it also adds an `unmanaged` class to the card, which reveals a confirm-gated "Reopen" button
-in place of "Details".
+way; it also adds an `unmanaged` class to the card, which reveals a confirm-gated "Take Control"
+button next to "Details".
 
 Opening a brand new tab and resuming into it (`claude --resume <id>`) only happens through the
-explicit `reopenSession()` export plus `POST /reopen`, wired to that Reopen button. The button
-first asks `window.confirm(...)`, so a duplicate tab now requires a deliberate, confirmed action
-instead of being a side effect of an ordinary card click. `reopenSession()` nulls the `sessionId`
-on any prior `managedTabs` entries bound to that session first (never removes them, since
-`tabIndex` is each entry's position in the array) so a later focus resolves to the fresh tab.
+explicit `reopenSession()` export plus `POST /reopen`, wired to that Take Control button. The
+button first opens the in-app confirm (`#confirmBackdrop`, see the Sessions board UI notes), so a
+duplicate tab requires a deliberate, confirmed action instead of being a side effect of an ordinary
+card click. `reopenSession()` nulls the `sessionId` on any prior `managedTabs` entries bound to that
+session (never removes them, since `tabIndex` is each entry's position in the array) so a later
+focus resolves to the fresh tab; that unbinding happens only AFTER the command is known to be
+launchable, so a refused reattach leaves the existing binding intact.
 
 Binding (`bindSession()`, called from the `SessionStart` hook and retried on every
 `UserPromptSubmit`) matches an unbound tab by cwd within `BIND_WINDOW_MS` (180s, generous enough
@@ -142,13 +158,16 @@ Still pending (not code-complete):
   Electron-as-node wrapper exists in `desktop/assets/`, mirroring `send-event.mjs.cmd`, and
   `desktop/main.mjs` sets `CMC_STATUSLINE_COMMAND` to it the way it already sets
   `CMC_HOOK_COMMAND`. Running the repo copy (`node start.mjs`) is unaffected and does feed it.
-- **Live focus/reattach validation on the real machine.** Launching is confirmed by hand
-  (2026-07-30): a real tab opened in the managed `cmc` window, hosted by
-  `powershell.exe -NoExit -Command "claude --name '<name>'"` with `claude.exe --name "<name>"`
-  as its child and the name as the tab title, and a named `POST /launch` reached the board as
-  `session.title`. Still unconfirmed by hand: `wt focus-tab`, the `claude --resume` reattach path,
-  and whether the `SetForegroundWindow` nudge really raises the window versus just flashing the
-  taskbar icon.
+- **Live focus/reattach validation on the real machine.** Confirmed by hand on 2026-07-30, after the
+  semicolon fix: `launchSession()` opens EXACTLY ONE tab in the managed `cmc` window (title = the
+  name, `claude.exe --name "<name>"` running as the hosted PowerShell's child, no junk tabs, no
+  0x80070002), and `reopenSession()` really reattaches (`claude.exe --resume <id>` running in a fresh
+  tab, that tab active in the window afterwards). Note Claude Code REPLACES our `--title` with the
+  resumed session's own name once it loads, so `bringToForeground()`'s title match can miss on a
+  reattach whose stored title differs from the session's real name; it is best effort and
+  `wt focus-tab` has already switched tabs by then. Still unconfirmed by hand: `wt focus-tab` on a
+  cold window, and whether the `SetForegroundWindow` nudge raises the window versus just flashing
+  the taskbar icon when the app is in the background.
 
 Landed 2026-07-19 (PRs #3, #4, #6, #8):
 - **Demo mode.** `public/demo.js` (zero-dep) drives the whole UI through a looping scripted fake
@@ -262,9 +281,19 @@ Design record: `https://claude.ai/code/artifact/d611c0ef-2208-4da3-90fb-4334b3d4
   count hits zero the filter self-heals back to `active`, but it leaves a manual choice alone.
   `Store.needsInput(s)` is the single shared predicate behind the counter and the filter.
 - **Resume on closed cards** POSTs `/reopen` with NO confirm (there is no duplicate-tab risk for a
-  closed session); `Reopen` keeps its confirm and only appears on an active card whose focus attempt
-  came back `unmanaged` (gated by the `is-active` class). `terminal.reopenSession(id, cwd, title)`
-  titles the resumed tab with the session name.
+  closed session); **Take Control** (the former "Reopen") keeps its confirm and only appears on an
+  active card whose focus attempt came back `unmanaged` (gated by the `is-active` class).
+  `terminal.reopenSession(id, cwd, title)` titles the resumed tab with the session name.
+- **The confirm is in-app, never `window.confirm`.** A native confirm cannot be styled at all and in
+  the Electron shell renders as a bare OS dialog titled "Mission Control Center", which reads like a
+  system error rather than an app decision. `showConfirm()` in `view-sessions.js` drives the
+  `#confirmBackdrop` markup in `index.html`, reusing the `.pop*` chrome so it matches the New session
+  modal (visibility on the BACKDROP, never the panel). Esc and the backdrop cancel, Enter confirms
+  (unless Cancel holds focus), focus opens on the confirm button and returns to the opener. The
+  session name is written with `textContent` into a `<b>` placeholder rather than interpolated into
+  the HTML. If the dialog markup is ever missing, `showConfirm()` runs the action rather than
+  silently dropping it. Covered by `scripts/render-check.mjs` (label, dialog, Esc-cancels-without-
+  POSTing, confirm-really-POSTs), which also saves a `<shot>-take-control.png` when given `--shot`.
 - `Store.fmt.model(session)` prettifies `claude-opus-5[1m]` to `Opus 5 (1M)`, preferring the
   server's `modelDisplay`, unknown ids passing through unchanged.
 - **The four header stat tiles are contextual, and have exactly one writer.** They used to be

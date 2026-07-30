@@ -552,6 +552,92 @@ try {
   check('launch still succeeds with no accounts available (falls back to the server default)',
     emptyAccounts.popupClosed === true, JSON.stringify(emptyAccounts));
 
+  // ---- Take Control (formerly "Reopen"): the in-app confirm that replaced
+  // window.confirm(). A native confirm() cannot be styled, blocks the page, and
+  // in the Electron shell renders as a bare OS dialog, so the styled dialog has
+  // to be verified in a real browser: that it opens, names the session, cancels
+  // without POSTing /reopen, and on accept really does call /reopen.
+  //
+  // The button only appears once a card is `unmanaged`, which is a /focus
+  // outcome. /focus is stubbed for exactly that one call (answering what the
+  // real server answers for a session with no managed tab) so the state is
+  // deterministic no matter what earlier launches in this run left in
+  // managedTabs. Everything after that, including /reopen, hits the real server.
+  const takeControl = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch;
+      var reopenCalls = 0;
+      window.fetch = function (url, opts) {
+        var u = String(url);
+        if (u.indexOf('/focus') !== -1) {
+          return Promise.resolve({ json: function () {
+            return Promise.resolve({ ok: false, mode: 'unmanaged', error: 'No known terminal tab for this session' });
+          } });
+        }
+        if (u.indexOf('/reopen') !== -1) reopenCalls += 1;
+        return originalFetch(url, opts);
+      };
+      var card = document.querySelector('.session-card');
+      card.click();
+      setTimeout(function () {
+        // Read the class HERE: a successful take-control clears the unmanaged
+        // class again (the card is managed once more), so reading it at the end
+        // would always come back without it.
+        var classesAfterFocus = card.className;
+        var btn = card.querySelector('.sc-reopen');
+        var btnLabel = btn ? btn.textContent.trim() : null;
+        var btnVisible = btn ? getComputedStyle(btn).display !== 'none' : false;
+        btn.click();
+        var bd = document.getElementById('confirmBackdrop');
+        var open = !!bd && getComputedStyle(bd).display !== 'none';
+        var titleText = (document.getElementById('confirmTitle') || {}).textContent || '';
+        var bodyText = (document.getElementById('confirmText') || {}).innerText || '';
+        var okLabel = (document.getElementById('confirmOkBtn') || {}).textContent || '';
+        var focused = document.activeElement ? document.activeElement.id : null;
+        var styled = !!bd && bd.classList.contains('pop-backdrop') && !!document.querySelector('#confirmPopup.pop');
+        // Esc must cancel WITHOUT reopening anything.
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        var closedAfterEsc = !!bd && getComputedStyle(bd).display === 'none';
+        var reopensAfterCancel = reopenCalls;
+        // Second run: confirm for real.
+        btn.click();
+        document.getElementById('confirmOkBtn').click();
+        setTimeout(function () {
+          var toast = document.querySelector('.toast');
+          window.fetch = originalFetch;
+          resolve({
+            cardClasses: classesAfterFocus, classesAfterConfirm: card.className,
+            btnLabel: btnLabel, btnVisible: btnVisible,
+            open: open, styled: styled, titleText: titleText.trim(), bodyText: bodyText,
+            okLabel: okLabel.trim(), focused: focused, closedAfterEsc: closedAfterEsc,
+            reopensAfterCancel: reopensAfterCancel, reopenCalls: reopenCalls,
+            closedAfterConfirm: getComputedStyle(bd).display === 'none',
+            toastText: toast ? toast.textContent : null,
+            toastShown: !!toast && toast.classList.contains('show')
+          });
+        }, 500);
+      }, 500);
+    });
+  })()`);
+  check('an unmanaged focus attempt marks the card and reveals its action',
+    /unmanaged/.test(takeControl.cardClasses) && takeControl.btnVisible === true, JSON.stringify(takeControl.cardClasses));
+  check('the action reads "Take Control", not "Reopen"', takeControl.btnLabel === 'Take Control', String(takeControl.btnLabel));
+  check('Take Control opens the in-app styled dialog (not window.confirm)',
+    takeControl.open === true && takeControl.styled === true, JSON.stringify(takeControl));
+  check('the dialog is titled Take Control and its button matches',
+    takeControl.titleText === 'Take Control' && takeControl.okLabel === 'Take Control', JSON.stringify(takeControl));
+  check('the dialog names the session and explains the duplicate-tab risk',
+    takeControl.bodyText.indexOf(LONG_NAME) !== -1 && /two tabs/.test(takeControl.bodyText), JSON.stringify(takeControl.bodyText));
+  check('focus lands on the confirm button', takeControl.focused === 'confirmOkBtn', String(takeControl.focused));
+  check('Esc cancels the dialog and reopens nothing',
+    takeControl.closedAfterEsc === true && takeControl.reopensAfterCancel === 0, JSON.stringify(takeControl));
+  check('confirming really calls POST /reopen and closes the dialog',
+    takeControl.reopenCalls === 1 && takeControl.closedAfterConfirm === true, JSON.stringify(takeControl));
+  check('taking control reports back in a toast',
+    takeControl.toastShown === true && /Took control/.test(String(takeControl.toastText)), JSON.stringify(takeControl.toastText));
+  check('a successful take-control clears the unmanaged mark from the card',
+    !/unmanaged/.test(takeControl.classesAfterConfirm), String(takeControl.classesAfterConfirm));
+
   const errs = cdp.jsErrors();
   check('no JS or console errors on the board', errs.length === 0, errs.slice(0, 5).join(' | '));
 
@@ -559,6 +645,19 @@ try {
     const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(SHOT, Buffer.from(shot.data, 'base64'));
     process.stdout.write('\nscreenshot: ' + SHOT + '\n');
+    // Second shot with the Take Control dialog open: the only way to actually
+    // LOOK at a modal that is closed again by the time the board settles.
+    await cdp.eval(`(function () {
+      var card = document.querySelector('.session-card');
+      card.classList.add('unmanaged');
+      card.querySelector('.sc-reopen').click();
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    const dialogShot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    const dialogPath = SHOT.replace(/(\.png)?$/i, '') + '-take-control.png';
+    fs.writeFileSync(dialogPath, Buffer.from(dialogShot.data, 'base64'));
+    process.stdout.write('screenshot: ' + dialogPath + '\n');
   }
 
   process.stdout.write(failures === 0 ? '\nRESULT: ALL PASS\n' : `\nRESULT: ${failures} FAILED\n`);
