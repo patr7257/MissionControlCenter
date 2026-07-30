@@ -12,8 +12,13 @@ directories:
   buildResources: build
 asar: false
 files:
-  - main.mjs
-  - update-check.mjs
+  # "*.mjs" (not an explicit list) for the same reason extraResources below uses
+  # a glob: 0.1.10 shipped dead because installer-cmd.mjs was added and imported
+  # from main.mjs but not added here, so the packaged app crashed with
+  # ERR_MODULE_NOT_FOUND while the repo copy and every CI check stayed green.
+  # scripts/check-desktop-package.mjs now asserts this file covers every local
+  # import reachable from main.mjs.
+  - "*.mjs"
   - preload.cjs
 extraResources:
   # Ship the existing zero-dependency backend + UI unchanged under resources/backend.
