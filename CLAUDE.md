@@ -347,6 +347,9 @@ silently ends up back on the shared HTTPS credential path.
 ## Verification tooling
 - `node scripts/smoke-server.mjs` - hermetic temp HOME, boots the server, checks the endpoints, hook
   ingestion, statusline ingestion, registry reconciliation and launch command shapes. Runs in CI.
+- `node scripts/check-installer-launch.mjs` - spawns the updater's real install command with a
+  stand-in for msiexec and asserts the MSI path arrives unmangled. Windows only (it is Windows
+  quoting under test), SKIPS with exit 0 elsewhere, and runs in the MSI workflow's Windows job.
 - `node scripts/render-check.mjs` - drives a REAL Chromium over the Chrome DevTools Protocol using
   Node's built-in global `WebSocket` (no dependencies, nothing installed), asserting card geometry
   across viewport widths, the filters, the popup and the account picker, and collecting console
@@ -407,6 +410,26 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
   this. `launchInstaller()` also delays via a detached `cmd /c ping ... & msiexec /i "<path>"`: no
   `start` wrapper (msiexec is on PATH and `start` needs a title argument that is easy to mangle) and
   no `>nul` (stdio is already ignored, and the redirect was observed erroring).
+- **The install command lives in `desktop/installer-cmd.mjs` and has TWO load-bearing details**
+  (fixed 2026-07-30, issue #18, after 0.1.7 to 0.1.9 could not self-update at all):
+  1. `windowsVerbatimArguments: true`. Without it Node quotes the whole `cmd /c ...` argument and
+     escapes the embedded quotes as `\"`; cmd.exe passes that through literally, so msiexec gets
+     `\"C:\...\x.msi\"` and fails with "This installation package could not be opened. Verify that
+     the package exists...". The download is fine and the MSI is sitting in `%TEMP%`, which makes
+     this look like a corrupt download. The `ping` half still runs, so the user sees the delay
+     window and then the error.
+  2. The command line must NOT start with a quote. `cmd /c` strips the outer quote pair in that
+     case, which breaks a quoted program path containing spaces. The unquoted leading `ping` is
+     what prevents it.
+  Both are asserted: `scripts/smoke-server.mjs` checks the spawn shape (platform neutral, runs in
+  CI) and `scripts/check-installer-launch.mjs` really spawns it with a stand-in for msiexec and
+  asserts the path arrives unmangled (Windows only, skips with exit 0 elsewhere, wired into the MSI
+  workflow's Windows job). Static review read the broken line as correct; only a real spawn settled
+  it. `launchInstaller()` also refuses to launch when the MSI path does not exist, so the caller
+  falls back to the releases page instead of quitting into a dead end.
+- `downloadReleaseMsi()` sweeps previous `cmc-update-*` temp dirs (`cleanupOldUpdateDirs()`) before
+  downloading. It used to leave one 100+ MB MSI per attempt behind forever; 8 dirs holding 778 MB
+  were found on the developer's machine.
 - Packaged installs register hooks via `resources\backend\send-event.mjs.cmd` (Electron-as-Node
   wrapper, no system Node needed); `install-hooks.mjs` honours the `CMC_HOOK_COMMAND` env
   override for this. The filename contains `send-event.mjs` on purpose so `SHIM_MARK` matching

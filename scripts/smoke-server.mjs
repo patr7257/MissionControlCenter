@@ -584,6 +584,51 @@ try {
   check('a registry file for a dead pid is ignored: live stays false, not flipped to true', r5 && r5.live === false);
   removeRegistryFile('smoke-r5');
 
+  // ---- Updater install command (desktop/installer-cmd.mjs). Platform neutral,
+  // so it runs in CI on Linux: it asserts the SHAPE handed to child_process.
+  // windowsVerbatimArguments is the load-bearing part. Without it Node quotes the
+  // whole `cmd /c ...` argument and escapes the embedded quotes as \", cmd passes
+  // \"C:\...\x.msi\" to msiexec, and the installer fails with "This installation
+  // package could not be opened" while the MSI sits fine in %TEMP% (issue #18).
+  // scripts/check-installer-launch.mjs proves the same thing by really spawning
+  // it, on Windows only. ----
+  const { installerSpawnArgs } = await import('../desktop/installer-cmd.mjs');
+  const MSI = 'C:\\Users\\pr\\AppData\\Local\\Temp\\cmc-update-x1\\Mission.Control.Center.9.9.9.msi';
+  const shape = installerSpawnArgs(MSI);
+  check('installer command runs through cmd /c', shape.file === 'cmd' && shape.args[0] === '/c');
+  check('installer command delays with ping before msiexec, in one cmd line',
+    typeof shape.args[1] === 'string' &&
+      /^ping -n \d+ 127\.0\.0\.1 & msiexec \/i "/.test(shape.args[1]) &&
+      shape.args[1].includes(MSI) &&
+      shape.args.length === 2);
+  check('installer command sets windowsVerbatimArguments so cmd gets the quotes unescaped',
+    shape.options && shape.options.windowsVerbatimArguments === true);
+  check('installer command stays detached with ignored stdio so it outlives the app',
+    shape.options && shape.options.detached === true && shape.options.stdio === 'ignore');
+  check('installer command adds no redirect (stdio is already ignored)', !shape.args[1].includes('>'));
+  // cmd /c strips the outer quote pair when the command line starts with a quote,
+  // which breaks a quoted program path containing spaces. The unquoted leading
+  // ping is what prevents that.
+  check('installer command line does not start with a quote', !shape.args[1].startsWith('"'));
+  check('installer command does not wrap msiexec in start', !/\bstart\b/.test(shape.args[1]));
+
+  // The temp-dir sweep must never delete the dir it was told to keep, and must
+  // never touch unrelated dirs. Run inside a SANDBOX, never the machine's real
+  // temp: the first version of this test called the sweep with its real default
+  // root and deleted the developer's genuinely downloaded MSIs mid-session.
+  const { cleanupOldUpdateDirs, UPDATE_DIR_PREFIX } = await import('../desktop/update-check.mjs');
+  const sweepRoot = fs.mkdtempSync(path.join(TMP_HOME, 'sweep-'));
+  const keep = fs.mkdtempSync(path.join(sweepRoot, UPDATE_DIR_PREFIX));
+  const stale = fs.mkdtempSync(path.join(sweepRoot, UPDATE_DIR_PREFIX));
+  const unrelated = fs.mkdtempSync(path.join(sweepRoot, 'cmc-not-an-update-'));
+  fs.writeFileSync(path.join(stale, 'old.msi'), 'x');
+  const removedCount = cleanupOldUpdateDirs(keep, sweepRoot);
+  check('update dir sweep removes a previous download dir', !fs.existsSync(stale) && removedCount === 1);
+  check('update dir sweep keeps the current download dir', fs.existsSync(keep));
+  check('update dir sweep leaves unrelated temp dirs alone', fs.existsSync(unrelated));
+  check('update dir sweep is scoped to the root it was given, not the real temp dir',
+    fs.existsSync(sweepRoot) && fs.readdirSync(sweepRoot).length === 2);
+
   process.stdout.write(failed ? '\nRESULT: FAIL\n' : '\nRESULT: ALL PASS\n');
   await cleanup(failed ? 1 : 0);
 } catch (e) {

@@ -11,6 +11,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { findNewerRelease, downloadReleaseMsi, RELEASES_URL } from './update-check.mjs';
+import { installerSpawnArgs } from './installer-cmd.mjs';
 
 const DEFAULT_PORT = 4317;
 const DATA_DIR = path.join(os.homedir(), '.claude', 'agent-fleet-monitor');
@@ -164,33 +165,18 @@ function stopServerAndRemoveHooks() {
 
 // Hands the MSI to a detached helper that waits a few seconds BEFORE starting
 // msiexec, so this app (and the backend process it spawned) are fully gone by
-// the time the installer inventories locked files.
+// the time the installer inventories locked files. The command shape, and why it
+// needs windowsVerbatimArguments, live in desktop/installer-cmd.mjs.
 //
-// This is why the delay exists: msiexec was previously started while the app was
-// still alive, and its "Files in Use" page then listed Mission Control Center.
-// Choosing "close the applications" there does not reliably help, because the
-// detached backend runs from the same installed binary and can survive. A
-// surviving backend keeps holding the port, and because server.mjs reads
-// public/** from disk per request, the upgraded window then loads the NEW UI
-// while the OLD backend code answers its API calls. That is exactly how a
-// 0.1.6 window ended up served by a pre-0.1.5 backend with no `accounts` in
-// GET /repos (2026-07-30).
-//
-// The detached `cmd` outlives us, so it can wait and only then start msiexec,
-// by which point this app and its backend are gone. Notes on the exact form:
-//   - `ping` is the dependency-free delay; `timeout` needs a console and fails
-//     in a detached process.
-//   - No `start` wrapper. msiexec is on PATH (C:\Windows\System32\msiexec.exe),
-//     and cmd passes the quoted path through as one argument even with spaces.
-//   - No `>nul`. stdio:'ignore' already discards everything, and the redirect
-//     was observed emitting "The system cannot find the path specified."
+// Returns false when there is nothing installable, so the caller can fall back to
+// the releases page instead of quitting into a dead end. The existsSync check is
+// the cheap guard for "the download vanished between fetching and launching":
+// msiexec's own failure is a modal dialog we cannot observe from here.
 function launchInstaller(msiPath) {
   try {
-    spawn('cmd', ['/c', `ping -n 6 127.0.0.1 & msiexec /i "${msiPath}"`], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    }).unref();
+    if (!msiPath || !fs.existsSync(msiPath)) return false;
+    const { file, args, options } = installerSpawnArgs(msiPath);
+    spawn(file, args, options).unref();
     return true;
   } catch {
     return false;
