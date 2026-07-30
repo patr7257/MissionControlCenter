@@ -93,7 +93,7 @@ const BIND_WINDOW_MS = 180000;
 // Resolves through fs.realpathSync first so a junction/symlink cwd compares
 // equal to the real path Windows Terminal reports, falling back to plain
 // string normalization if realpath fails (path does not exist yet, etc).
-function normalizePath(p) {
+export function normalizePath(p) {
   if (!p) return '';
   let resolved = String(p);
   try {
@@ -362,7 +362,14 @@ export function focusSession(sessionId, cwd) {
 // of focusSession, moved here verbatim so it only ever runs behind a deliberate
 // action (the UI's confirm-gated Reopen button), never as a side effect of a
 // plain card click.
-export function reopenSession(sessionId, cwd) {
+// `title`, when given, is the session's own display name (e.g. what SessionStart
+// or a statusline payload learned, or what launchSession/claude --name set
+// originally): sanitized and used as the tab title so a resumed session reads
+// the same in the terminal as it did on the board, instead of the generic
+// 'resume:<id>' placeholder. Falls back to that placeholder when there is no
+// usable title. The command itself is unaffected either way: `claude --resume`
+// already restores the session's own name, so --name is never added here.
+export function reopenSession(sessionId, cwd, title) {
   try {
     if (!cwd) {
       return { ok: false, mode: 'unmanaged', error: 'No known working directory for this session' };
@@ -379,12 +386,13 @@ export function reopenSession(sessionId, cwd) {
 
     // --title lets bringToForeground() find the right window afterwards by
     // its active tab title.
-    const title = 'resume:' + sessionId;
+    const sanitizedTitle = sanitizeSessionName(title);
+    const tabTitle = sanitizedTitle || 'resume:' + sessionId;
     // PowerShell hosts the tab for the same reasons as launchSession (profile
     // loads, the tab survives Claude exiting). No --name here: the resumed
     // session already carries whatever display name it was given.
     const args = [
-      '-w', WT_WINDOW, 'nt', '-d', cwd, '--title', title,
+      '-w', WT_WINDOW, 'nt', '-d', cwd, '--title', tabTitle,
       'powershell.exe', '-NoExit', '-Command', 'claude --resume ' + sessionId,
     ];
     // Quote the cwd (index 4), title (index 6) and the PowerShell command
@@ -392,7 +400,7 @@ export function reopenSession(sessionId, cwd) {
     // the sessionId inside that command, stays bare.
     const command = buildReadableCommand(args, new Set([4, 6, 10]));
     const tabIndex = managedTabs.length;
-    const entry = { sessionId, cwd, title, launchName: '', launchedAt: Date.now(), tabIndex };
+    const entry = { sessionId, cwd, title: tabTitle, launchName: '', launchedAt: Date.now(), tabIndex };
 
     if (process.env.CMC_DRY_RUN) {
       managedTabs.push(entry);
@@ -404,7 +412,7 @@ export function reopenSession(sessionId, cwd) {
     managedTabs.push(entry);
     saveManagedTabs();
     enforceManagedTabsCap();
-    bringToForeground(title);
+    bringToForeground(tabTitle);
     return { ok: true, mode: 'reattached', command };
   } catch (error) {
     return { ok: false, error: String(error) };

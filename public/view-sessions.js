@@ -11,10 +11,6 @@
     working: 'Working', awaiting: 'Awaiting input', 'needs-permission': 'Needs permission',
     recent: 'Recent', ended: 'Ended'
   };
-  var STATUS_DOT = {
-    working: 'var(--working)', awaiting: 'var(--accent)', 'needs-permission': '#ffb43d',
-    recent: 'var(--muted)', ended: '#5a6172'
-  };
 
   // ---- Filters (fixed startup defaults, deliberately NOT persisted) ----
   // The board always opens scoped to today's active sessions, which is what the
@@ -33,10 +29,23 @@
     var d = new Date(ts), n = new Date();
     return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
   }
+  function isWithinDays(ts, days) {
+    if (!ts) return false;
+    return (Date.now() - ts) <= days * 24 * 60 * 60 * 1000;
+  }
+  // Whether ANY tracked session (regardless of the other filters) needs input
+  // right now, used to self-heal the Needs input filter back to Active.
+  function anyNeedsInput() {
+    var any = false;
+    Store.sessions.forEach(function (s) { if (Store.needsInput(s)) any = true; });
+    return any;
+  }
   function passesFilters(s) {
     if (filters.state === 'active' && !isActiveSession(s)) return false;
     if (filters.state === 'closed' && isActiveSession(s)) return false;
+    if (filters.state === 'needs-input' && !Store.needsInput(s)) return false;
     if (filters.time === 'today' && !isToday(s.lastActivityAt)) return false;
+    if (filters.time === 'week' && !isWithinDays(s.lastActivityAt, 7)) return false;
     if (filters.repo && (s.project || '') !== filters.repo) return false;
     return true;
   }
@@ -71,6 +80,16 @@
     rp.addEventListener('change', function () { filters.repo = rp.value; syncAll(); });
   }
 
+  // Switch the Show filter (used by the attention pill: "N need input" jumps
+  // straight to the Needs input filter) and keep the visible <select> in sync,
+  // not just the internal filters object.
+  function setStateFilter(value) {
+    filters.state = value;
+    var st = document.getElementById('fltState');
+    if (st) st.value = value;
+    syncAll();
+  }
+
   function fmtRelative(ts) {
     if (!ts) return '';
     var diff = Date.now() - ts;
@@ -97,47 +116,64 @@
     return list;
   }
 
+  // ---- Card (variant 05 "Editorial": status line, 18px title, mono
+  // project/branch line, a context ring at the right of the header, the
+  // prompt as a pull quote, and a footer row with mono meta on the left and
+  // action buttons on the right. Nothing is absolutely positioned; nothing
+  // overlaps.) ----
   function createCard(s) {
     var el = document.createElement('div');
     el.className = 'session-card';
     el.setAttribute('data-id', s.id);
     el.title = 'Click to bring this session\'s terminal window to the front';
     el.innerHTML =
-      '<button type="button" class="sc-details">Details</button>' +
-      '<button type="button" class="sc-reopen">Reopen</button>' +
-      '<div class="sc-top">' +
-        '<span class="sc-dot"></span>' +
-        '<div class="sc-heading"><span class="sc-name"></span><span class="sc-project"></span><span class="sc-branch"></span></div>' +
-        '<span class="sc-status"></span>' +
+      '<div class="sc-head">' +
+        '<div class="sc-h">' +
+          '<div class="sc-st"><span class="sc-pip"></span><span class="sc-st-label"></span></div>' +
+          '<div class="sc-title"></div>' +
+          '<div class="sc-where"></div>' +
+        '</div>' +
+        '<div class="sc-ring" style="display:none"><div><b></b><span>CTX</span></div></div>' +
       '</div>' +
       '<div class="sc-prompt"></div>' +
-      '<div class="sc-meta">' +
-        '<span class="sc-time"></span>' +
-        '<span class="sc-model"></span>' +
-        '<span class="sc-badge" style="display:none"></span>' +
+      '<div class="sc-foot">' +
+        '<span class="sc-meta">' +
+          '<b class="sc-model"></b><span class="sc-time"></span><b class="sc-badge" style="display:none"></b>' +
+        '</span>' +
+        '<span class="sc-acts">' +
+          '<button type="button" class="sc-details">Details</button>' +
+          '<button type="button" class="sc-resume prim" style="display:none">Resume</button>' +
+          '<button type="button" class="sc-reopen">Reopen</button>' +
+        '</span>' +
       '</div>';
     el.classList.add('enter');
     setTimeout(function () { el.classList.remove('enter'); }, 280);
     var c = {
       el: el,
-      dot: el.querySelector('.sc-dot'),
-      name: el.querySelector('.sc-name'),
-      project: el.querySelector('.sc-project'),
-      branch: el.querySelector('.sc-branch'),
-      status: el.querySelector('.sc-status'),
+      stLabel: el.querySelector('.sc-st-label'),
+      title: el.querySelector('.sc-title'),
+      where: el.querySelector('.sc-where'),
+      ring: el.querySelector('.sc-ring'),
+      ringPct: el.querySelector('.sc-ring b'),
       prompt: el.querySelector('.sc-prompt'),
       time: el.querySelector('.sc-time'),
       model: el.querySelector('.sc-model'),
       badge: el.querySelector('.sc-badge'),
       details: el.querySelector('.sc-details'),
+      resume: el.querySelector('.sc-resume'),
       reopen: el.querySelector('.sc-reopen'),
-      _status: null, _project: null, _branch: null, _prompt: null, _model: null, _badge: null,
+      _status: null, _isActive: null, _title: null, _where: null, _prompt: null,
+      _model: null, _badge: null, _ctxPct: undefined, _ctxSev: null, _closed: null,
       _id: s.id
     };
     el.addEventListener('click', function () { focusCard(c); });
     c.details.addEventListener('click', function (ev) {
       ev.stopPropagation();
       Store.selectSession(c._id);
+    });
+    c.resume.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      resumeCard(c);
     });
     c.reopen.addEventListener('click', function (ev) {
       ev.stopPropagation();
@@ -174,14 +210,13 @@
     });
   }
 
-  // Explicit reattach, gated behind a confirm dialog: opens a brand new
-  // terminal tab and resumes into it with `claude --resume`. Only reachable
-  // from the Reopen button, which itself only shows up once a focus attempt
-  // has come back unmanaged, so this never fires as a side effect of a
-  // plain card click.
-  function reopenCard(c) {
-    if (!window.confirm('Open a new terminal tab for this session? Use this only if the old terminal window is gone.')) return;
-    fetch('/reopen', {
+  // Shared reattach call: opens a brand new terminal tab and resumes into it
+  // with `claude --resume`. Reopen gates this behind a confirm dialog (it is
+  // only reachable once an active session's focus attempt has come back
+  // unmanaged); Resume does not (resuming a CLOSED session is the intended
+  // action, there is no duplicate-tab risk since nothing else could be open).
+  function doReopen(c) {
+    return fetch('/reopen', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: c._id })
@@ -195,6 +230,11 @@
       showToast('Could not reach the server to reopen that terminal.');
     });
   }
+  function reopenCard(c) {
+    if (!window.confirm('Open a new terminal tab for this session? Use this only if the old terminal window is gone.')) return;
+    doReopen(c);
+  }
+  function resumeCard(c) { doReopen(c); }
 
   var toastEl = null;
   var toastTimer = null;
@@ -214,30 +254,36 @@
     if (c._status !== s.status) {
       c.el.classList.remove('status-working', 'status-awaiting', 'status-needs-permission', 'status-recent', 'status-ended');
       c.el.classList.add('status-' + s.status);
-      c.dot.style.background = STATUS_DOT[s.status] || 'var(--muted)';
-      c.status.textContent = STATUS_LABEL[s.status] || s.status;
+      c.stLabel.textContent = STATUS_LABEL[s.status] || s.status;
       c._status = s.status;
     }
-    // A named session (launched from here with a name, see claude --name) leads with
-    // that name and demotes the project to the secondary line; unnamed cards look
-    // exactly as they always did.
-    var name = s.title || '';
-    if (c._name !== name) {
-      c.name.textContent = name;
-      c.name.style.display = name ? '' : 'none';
-      c.el.classList.toggle('has-name', !!name);
-      c._name = name;
+    var isActive = isActiveSession(s);
+    if (c._isActive !== isActive) {
+      c.el.classList.toggle('is-active', isActive);
+      c._isActive = isActive;
     }
+    // Heading: the session's name if it has one (claude --name, or picked up
+    // from the session registry), else the project.
+    var named = !!s.title;
+    var title = s.title || s.project || '(unknown project)';
+    if (c._title !== title) { c.title.textContent = title; c._title = title; }
+    // The line underneath never repeats the heading: an unnamed card is
+    // already titled with its project, so it shows the branch alone. Only a
+    // named card needs the project spelled out again.
     var project = s.project || '(unknown project)';
-    if (c._project !== project) { c.project.textContent = project; c._project = project; }
-    var branch = s.branch || '';
-    if (c._branch !== branch) { c.branch.textContent = branch; c._branch = branch; }
+    var where;
+    if (named) {
+      where = s.branch ? (project + ' / ' + s.branch) : project;
+    } else {
+      where = s.branch || '';
+    }
+    if (c._where !== where) { c.where.textContent = where; c._where = where; }
     var prompt = s.lastPrompt || '';
     if (c._prompt !== prompt) { c.prompt.textContent = prompt; c._prompt = prompt; }
-    var model = s.model || '';
+    var model = F.model(s);
     if (c._model !== model) {
       c.model.textContent = model;
-      c.model.classList.toggle('sc-model-empty', !model);
+      c.model.style.display = model ? '' : 'none';
       c._model = model;
     }
     var badgeText = (s.subagentCount && s.subagentCount > 0) ? (s.subagentCount + ' subagent' + (s.subagentCount === 1 ? '' : 's')) : '';
@@ -246,6 +292,34 @@
       c.badge.style.display = badgeText ? '' : 'none';
       c._badge = badgeText;
     }
+    // Context ring: hidden entirely when null. Severity ramp (under 60 accent,
+    // 60-85 amber, 85+ red) is a class on the CARD itself (.lo/.mid/.hi), so
+    // the ring's conic-gradient can read --sev by inheritance.
+    var ctxPct = (s.ctxPct == null) ? null : Math.max(0, Math.min(100, Math.round(s.ctxPct)));
+    if (c._ctxPct !== ctxPct) {
+      if (ctxPct == null) {
+        c.ring.style.display = 'none';
+        if (c._ctxSev) { c.el.classList.remove(c._ctxSev); c._ctxSev = null; }
+      } else {
+        c.ring.style.display = '';
+        c.ring.style.setProperty('--pct', ctxPct);
+        c.ringPct.textContent = ctxPct;
+        var sev = ctxPct >= 85 ? 'hi' : ctxPct >= 60 ? 'mid' : 'lo';
+        if (c._ctxSev !== sev) {
+          if (c._ctxSev) c.el.classList.remove(c._ctxSev);
+          c.el.classList.add(sev);
+          c._ctxSev = sev;
+        }
+      }
+      c._ctxPct = ctxPct;
+    }
+    // Actions: Details always, Resume when closed, Reopen (CSS-driven via
+    // .unmanaged.is-active) only while active and unmanaged.
+    var closed = !isActive;
+    if (c._closed !== closed) {
+      c.resume.style.display = closed ? '' : 'none';
+      c._closed = closed;
+    }
     c.time.textContent = fmtRelative(s.lastActivityAt);
     c.el.setAttribute('data-last-activity', s.lastActivityAt || '');
   }
@@ -253,6 +327,14 @@
   function syncAll() {
     var wrap = document.getElementById('sessionsWrap');
     if (!wrap) return;
+    // Self-heal: the Needs input filter never sits on an empty board. The
+    // moment nothing needs input, fall back to Active automatically. This
+    // never fires for any OTHER manually chosen filter value.
+    if (filters.state === 'needs-input' && !anyNeedsInput()) {
+      filters.state = 'active';
+      var st = document.getElementById('fltState');
+      if (st) st.value = 'active';
+    }
     var list = sortedSessions();
     var seen = new Set();
     list.forEach(function (s) {
@@ -279,11 +361,13 @@
     }
   }
 
-  // Cascading New session picker. /repos returns { root, tree } where tree is a
-  // bounded folder tree; each dropdown lists one folder level. Choosing a folder that
-  // has subfolders spawns the next dropdown (up to MAX_SELECTORS), each starting on
-  // "Not selected" unless DEFAULT_REPO_CHAIN preselects it. New session launches in the
-  // deepest folder actually selected, or the repos root if nothing is selected.
+  // Cascading New session picker, now hosted inside a popup dialog instead of
+  // a top-of-board bar. /repos returns { root, tree } where tree is a bounded
+  // folder tree; each dropdown lists one folder level. Choosing a folder that
+  // has subfolders spawns the next dropdown (up to MAX_SELECTORS), each starting
+  // on "Not selected" unless DEFAULT_REPO_CHAIN preselects it. New session
+  // launches in the deepest folder actually selected, or the repos root if
+  // nothing is selected.
   var MAX_SELECTORS = 5;
   // Folder NAMES (not paths) preselected on every app open, since nearly every session
   // starts under this folder. Matched case-insensitively level by level; a rename, a
@@ -299,9 +383,17 @@
   }
   function selectorsEl() { return document.getElementById('newSessionSelectors'); }
 
+  // Keeps the popup footer's path readout in sync with whatever the chain
+  // currently resolves to (mirrors the design specimen's .pop-foot .path).
+  function updateLaunchPath() {
+    var el = document.getElementById('newSessionPath');
+    if (!el) return;
+    el.textContent = currentLaunchPath() || repoRoot || '';
+  }
+
   function makeSelect(nodes) {
     var sel = document.createElement('select');
-    sel.className = 'ns-select';
+    sel.className = 'sel';
     sel.appendChild(oneOption('', 'Not selected'));
     nodes.forEach(function (n) { sel.appendChild(oneOption(n.path, n.name)); });
     sel._nodes = nodes;
@@ -317,6 +409,7 @@
     if (node && node.children && node.children.length && host.children.length < MAX_SELECTORS) {
       host.appendChild(makeSelect(node.children));
     }
+    updateLaunchPath();
   }
   // Walk DEFAULT_REPO_CHAIN, selecting one level per name and letting the normal
   // change handler spawn the next dropdown, so the preselected chain is identical to
@@ -342,19 +435,21 @@
     if (!host) return;
     host.innerHTML = '';
     if (!repoTree.length) {
-      var s = document.createElement('select'); s.className = 'ns-select'; s.disabled = true;
+      var s = document.createElement('select'); s.className = 'sel'; s.disabled = true;
       s.appendChild(oneOption('', 'No repos found'));
       host.appendChild(s);
+      updateLaunchPath();
       return;
     }
     host.appendChild(makeSelect(repoTree));
     applyDefaultChain();
+    updateLaunchPath();
   }
   function loadRepos() {
     var host = selectorsEl();
     if (!host) return;
-    // activate() runs on every return to the board (drilling out of a session's
-    // Details included). Once the tree is loaded and a real chain is on screen,
+    // Fetched lazily on first popup open (see openNewSessionPopup), not from
+    // activate(): once the tree is loaded and a real chain is on screen,
     // refetching would only wipe whatever the user just picked.
     if (repoTree.length && host.children.length && !host.children[0].disabled) return;
     fetch('/repos').then(function (res) { return res.json(); }).then(function (data) {
@@ -363,7 +458,8 @@
       renderSelectors();
     }).catch(function () {
       var host = selectorsEl();
-      if (host) { host.innerHTML = ''; var s = document.createElement('select'); s.className = 'ns-select'; s.disabled = true; s.appendChild(oneOption('', 'Failed to load repos')); host.appendChild(s); }
+      if (host) { host.innerHTML = ''; var s = document.createElement('select'); s.className = 'sel'; s.disabled = true; s.appendChild(oneOption('', 'Failed to load repos')); host.appendChild(s); }
+      updateLaunchPath();
     });
   }
 
@@ -396,7 +492,12 @@
     }).then(function (res) { return res.json(); }).then(function (data) {
       var failed = data && data.ok === false;
       if (feedback) feedback.textContent = failed ? 'Launch failed' : 'Launched ' + label;
-      if (!failed && nameEl) nameEl.value = '';
+      if (!failed) {
+        if (nameEl) nameEl.value = '';
+        // A successful launch closes the popup; a failed one leaves it open
+        // (with the repo/name still filled in) so the developer can retry.
+        closeNewSessionPopup();
+      }
       btn.disabled = false;
       setTimeout(function () { if (feedback) feedback.textContent = ''; }, 2500);
     }).catch(function () {
@@ -406,7 +507,31 @@
     });
   }
 
-  function initNewSessionBar() {
+  // ---- New session popup chrome (Esc closes, backdrop click closes, focus
+  // moves to Name on open and back to the opener button on close). The popup
+  // markup lives outside #viewSessions in index.html (a fixed backdrop), so
+  // this wiring runs once at load, independent of the sessions view's own
+  // activate/deactivate lifecycle. ----
+  function openNewSessionPopup() {
+    var backdrop = document.getElementById('newSessionBackdrop');
+    if (!backdrop) return;
+    backdrop.style.display = 'flex';
+    loadRepos();
+    updateLaunchPath();
+    var nameEl = document.getElementById('newSessionName');
+    if (nameEl) nameEl.focus();
+    document.addEventListener('keydown', onPopupKeydown);
+  }
+  function closeNewSessionPopup() {
+    var backdrop = document.getElementById('newSessionBackdrop');
+    if (backdrop) backdrop.style.display = 'none';
+    document.removeEventListener('keydown', onPopupKeydown);
+    var openBtn = document.getElementById('newSessionOpenBtn');
+    if (openBtn) openBtn.focus();
+  }
+  function onPopupKeydown(e) { if (e.key === 'Escape') closeNewSessionPopup(); }
+
+  function initNewSessionPopup() {
     var btn = document.getElementById('newSessionBtn');
     if (!btn || btn._wired) return;
     btn._wired = true;
@@ -417,6 +542,80 @@
         if (e.key === 'Enter' && !btn.disabled) launchSession();
       });
     }
+    var cancelBtn = document.getElementById('newSessionCancelBtn');
+    if (cancelBtn) cancelBtn.addEventListener('click', closeNewSessionPopup);
+    var backdrop = document.getElementById('newSessionBackdrop');
+    if (backdrop) {
+      backdrop.addEventListener('click', function (e) { if (e.target === backdrop) closeNewSessionPopup(); });
+    }
+  }
+
+  // ---- Top-bar usage meters (5h / 7d quota). Lives in the header, so it is
+  // rendered independent of which view is active; wired once at load. ----
+  var usageRefs = null;
+  var STALE_MS = 5 * 60 * 1000;
+  function sevClass(pct) { return pct >= 85 ? 'hi' : pct >= 60 ? 'mid' : 'lo'; }
+  function fmtClock(ts) {
+    if (!ts) return '';
+    var d = new Date(ts);
+    var hh = d.getHours(), mm = d.getMinutes();
+    return (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm;
+  }
+  function ensureUsageDom() {
+    if (usageRefs) return usageRefs;
+    var host = document.getElementById('usageMeters');
+    if (!host) return null;
+    host.innerHTML =
+      '<div class="g" id="meterFive" style="display:none"><span class="ring"><i></i></span><span class="lb">5 hour<em></em></span></div>' +
+      '<div class="g" id="meterSeven" style="display:none"><span class="ring"><i></i></span><span class="lb">7 day<em></em></span></div>';
+    usageRefs = {
+      host: host,
+      five: { wrap: document.getElementById('meterFive'), ring: host.querySelector('#meterFive .ring'), val: host.querySelector('#meterFive i'), note: host.querySelector('#meterFive em'), _sev: null, _pct: undefined, _note: null },
+      seven: { wrap: document.getElementById('meterSeven'), ring: host.querySelector('#meterSeven .ring'), val: host.querySelector('#meterSeven i'), note: host.querySelector('#meterSeven em'), _sev: null, _pct: undefined, _note: null }
+    };
+    return usageRefs;
+  }
+  function renderUsageWindow(ref, data, stale, freshNote, ageText) {
+    if (!data || data.pct == null) {
+      if (ref.wrap.style.display !== 'none') ref.wrap.style.display = 'none';
+      ref._sev = null; ref._pct = undefined; ref._note = null;
+      return;
+    }
+    if (ref.wrap.style.display === 'none') ref.wrap.style.display = '';
+    var pct = Math.max(0, Math.min(100, Math.round(data.pct)));
+    var sev = sevClass(pct);
+    if (ref._sev !== sev) {
+      if (ref._sev) ref.wrap.classList.remove(ref._sev);
+      ref.wrap.classList.add(sev);
+      ref._sev = sev;
+    }
+    if (ref._pct !== pct) {
+      ref.ring.style.setProperty('--pct', pct);
+      ref.val.textContent = pct;
+      ref._pct = pct;
+    }
+    var note = stale ? (ageText || 'stale') : (freshNote || '');
+    if (ref._note !== note) { ref.note.textContent = note; ref._note = note; }
+  }
+  function updateUsageMeters() {
+    var refs = ensureUsageDom();
+    if (!refs) return;
+    var usage = Store.usage;
+    if (!usage) {
+      refs.five.wrap.style.display = 'none';
+      refs.seven.wrap.style.display = 'none';
+      refs.host.classList.remove('stale');
+      return;
+    }
+    // The feed only updates while some session renders its statusline, so a
+    // reading older than 5 minutes is dimmed and shown as an age rather than
+    // implied to be current.
+    var stale = !!(usage.at && (Date.now() - usage.at) > STALE_MS);
+    refs.host.classList.toggle('stale', stale);
+    var ageText = usage.at ? fmtRelative(usage.at) : '';
+    var fiveNote = (usage.fiveHour && usage.fiveHour.resetsAt) ? ('resets ' + fmtClock(usage.fiveHour.resetsAt)) : '';
+    renderUsageWindow(refs.five, usage.fiveHour, stale, fiveNote, ageText);
+    renderUsageWindow(refs.seven, usage.sevenDay, stale, 'rolling', ageText);
   }
 
   function tick() {
@@ -427,20 +626,23 @@
     });
   }
   Store.onTick(tick);
+  Store.onTick(updateUsageMeters);
+  Store.onUsage(updateUsageMeters);
+  initNewSessionPopup();
 
   window.ViewSessions = {
     id: 'sessions',
     el: document.getElementById('viewSessions'),
     activate: function () {
-      initNewSessionBar();
       initFilters();
-      loadRepos();
       populateRepoFilter();
       syncAll();
     },
     deactivate: function () {},
     reset: function () { populateRepoFilter(); syncAll(); },
     update: function () {},
-    sessionsChanged: function () { if (Store.getActiveId() === 'sessions') { populateRepoFilter(); syncAll(); } }
+    sessionsChanged: function () { if (Store.getActiveId() === 'sessions') { populateRepoFilter(); syncAll(); } },
+    setStateFilter: setStateFilter,
+    openNewSession: openNewSessionPopup
   };
 })();

@@ -11,16 +11,18 @@
   <header>
     <h1><span class="dot">&#9679;</span> Mission Control Center</h1>
     <div class="conn" id="conn"><span class="led"></span><span id="connText">connecting</span></div>
-    <button class="attention" id="attention" type="button" style="display:none" title="Jump to the sessions waiting for you">
+    <button class="attention" id="attention" type="button" style="display:none" title="Switch to Needs input and jump to the sessions waiting for you">
       <span class="att-dot"></span><span id="attCount">0</span> need input
     </button>
     <div class="nav" id="nav">
       <button data-view="sessions" class="navbtn on" id="navSessions">Sessions</button>
+      <button class="gobtn" id="newSessionOpenBtn" type="button">New session</button>
     </div>
     <div class="crumb" id="crumb" style="display:none">
       <button id="crumbBack">&#8592; Sessions</button>
       <span class="crumb-session" id="crumbSession"></span>
     </div>
+    <div class="m5" id="usageMeters"></div>
     <div class="stats">
       <div class="stat"><div class="n" id="sActive">0</div><div class="l">working</div></div>
       <div class="stat"><div class="n" id="sDone">0</div><div class="l">done</div></div>
@@ -29,25 +31,41 @@
     </div>
   </header>
 
-  <div id="viewSessions" class="view active">
-    <div class="new-session-bar" id="newSessionBar">
-      <label class="ns-label">Repos:</label>
-      <span id="newSessionSelectors" class="ns-selectors"><select class="ns-select" disabled><option>Loading...</option></select></span>
-      <label class="ns-label" for="newSessionName">Name:</label>
-      <input id="newSessionName" class="ns-input" type="text" maxlength="60" placeholder="Session name (optional)" autocomplete="off" spellcheck="false">
-      <button id="newSessionBtn" class="ns-btn" type="button">New session</button>
-      <span class="ns-feedback" id="newSessionFeedback"></span>
+  <div class="pop-backdrop" id="newSessionBackdrop" style="display:none">
+    <div class="pop" id="newSessionPopup" role="dialog" aria-modal="true" aria-labelledby="newSessionPopupTitle">
+      <div class="pop-head"><b id="newSessionPopupTitle">New session</b><span>esc to close</span></div>
+      <div class="pop-body">
+        <div class="fld">
+          <label>Folder</label>
+          <span id="newSessionSelectors" class="chain"><select class="sel" disabled><option>Loading...</option></select></span>
+        </div>
+        <div class="fld">
+          <label for="newSessionName">Name (optional)</label>
+          <input id="newSessionName" class="inp" type="text" maxlength="60" placeholder="Session name (optional)" autocomplete="off" spellcheck="false">
+        </div>
+        <span class="ns-feedback" id="newSessionFeedback"></span>
+      </div>
+      <div class="pop-foot">
+        <span class="path" id="newSessionPath"></span>
+        <button id="newSessionCancelBtn" class="ghostbtn" type="button">Cancel</button>
+        <button id="newSessionBtn" class="gobtn" type="button">Launch</button>
+      </div>
     </div>
+  </div>
+
+  <div id="viewSessions" class="view active">
     <div class="filter-bar" id="filterBar">
       <label class="flt-label" for="fltState">Show:</label>
       <select id="fltState" class="flt-select">
         <option value="all">All</option>
         <option value="active" selected>Active</option>
+        <option value="needs-input">Needs input</option>
         <option value="closed">Closed</option>
       </select>
       <select id="fltTime" class="flt-select">
         <option value="all">All time</option>
         <option value="today" selected>Today</option>
+        <option value="week">7 days</option>
       </select>
       <select id="fltRepo" class="flt-select">
         <option value="">All repos</option>
@@ -106,11 +124,15 @@
 
       document.getElementById('navSessions').addEventListener('click', function () { Store.clearSession(); });
       document.getElementById('crumbBack').addEventListener('click', function () { Store.clearSession(); });
-      // Attention pill: jump back to the board (where blocked sessions sort to the top).
+      // Attention pill: it is now a filter control. Jump back to the board,
+      // switch Show to "Needs input" so the blocked sessions are the only
+      // thing on screen, and scroll to the top.
       document.getElementById('attention').addEventListener('click', function () {
         Store.clearSession();
+        ViewSessions.setStateFilter('needs-input');
         window.scrollTo({ top: 0, behavior: 'smooth' });
       });
+      document.getElementById('newSessionOpenBtn').addEventListener('click', function () { ViewSessions.openNewSession(); });
 
       Store.setActive('sessions');
       updateCrumb();

@@ -27,23 +27,31 @@
   // loop so startedAt/lastActivityAt stay realistic relative to "now". ----
   function buildScenario() {
     var base = Date.now();
+    // ctxPct is deliberately spread across all three severity bands (lo,
+    // mid, hi) so the showcase demonstrates the ring's severity ramp, not
+    // just one flat colour. modelDisplay is set explicitly (as the server
+    // would), exercising the "prefers modelDisplay over the raw id" path in
+    // Store.fmt.model rather than its regex-prettify fallback.
     var sessAlpha = {
       id: 'demo-session-alpha', cwd: 'C:/Users/demo/repos/zrm-crm-portal', project: 'zrm-crm-portal',
-      branch: 'feature/invoice-export', model: 'claude-opus-4-8', status: 'working',
+      branch: 'feature/invoice-export', model: 'claude-opus-5', modelDisplay: 'Opus 5', status: 'working',
       title: 'Invoice export pipeline', lastPrompt: 'Add CSV export for overdue invoices to the billing dashboard',
-      startedAt: base - 9 * 60000, lastActivityAt: base, live: true, source: 'demo'
+      startedAt: base - 9 * 60000, lastActivityAt: base, live: true, source: 'demo',
+      ctxPct: 42, ctxTokens: 84000, ctxSize: 200000, usageAt: base
     };
     var sessBravo = {
       id: 'demo-session-bravo', cwd: 'C:/Users/demo/repos/aigentur-web', project: 'aigentur-web',
-      branch: 'main', model: 'claude-sonnet-5', status: 'working',
+      branch: 'main', model: 'claude-sonnet-5', modelDisplay: 'Sonnet 5', status: 'working',
       title: 'Landing page revamp', lastPrompt: 'Refresh the hero section copy and add a pricing table',
-      startedAt: base - 6 * 60000, lastActivityAt: base, live: true, source: 'demo'
+      startedAt: base - 6 * 60000, lastActivityAt: base, live: true, source: 'demo',
+      ctxPct: 71, ctxTokens: 142000, ctxSize: 200000, usageAt: base
     };
     var sessCharlie = {
       id: 'demo-session-charlie', cwd: 'C:/Users/demo/repos/cvrintegration-api', project: 'cvrintegration-api',
-      branch: 'fix/rate-limit', model: 'claude-sonnet-5', status: 'awaiting',
+      branch: 'fix/rate-limit', model: 'claude-sonnet-5', modelDisplay: 'Sonnet 5', status: 'awaiting',
       title: 'CVR API rate limit fix', lastPrompt: 'Investigate intermittent 429s from the CVR lookup endpoint',
-      startedAt: base - 3 * 60000, lastActivityAt: base, live: true, source: 'demo'
+      startedAt: base - 3 * 60000, lastActivityAt: base, live: true, source: 'demo',
+      ctxPct: 88, ctxTokens: 176000, ctxSize: 200000, usageAt: base
     };
     var sessions = [sessAlpha, sessBravo, sessCharlie];
 
@@ -103,12 +111,24 @@
 
     var firstSeenAt = sessions.reduce(function (m, s) { return Math.min(m, s.startedAt); }, agents.reduce(function (m, a) { return Math.min(m, a.startedAt); }, Date.now()));
 
+    // Account-wide 5h/7d quota, fresh as of "now". Sent both inline on the
+    // snapshot AND as a standalone `usage` frame a moment later, so the
+    // showcase exercises both paths store.js accepts this on.
+    var usageNow = Date.now();
+    var usage = {
+      fiveHour: { pct: 42, resetsAt: usageNow + 96 * 60000 },
+      sevenDay: { pct: 68, resetsAt: usageNow + 3 * 24 * 60 * 60000 },
+      at: usageNow
+    };
+
     Store.ingest({
       type: 'snapshot',
       firstSeenAt: firstSeenAt,
       agents: agents.map(clone),
-      sessions: sessions.map(sessionWire)
+      sessions: sessions.map(sessionWire),
+      usage: usage
     });
+    Store.ingest({ type: 'usage', usage: usage });
 
     var conn = document.getElementById('conn');
     var connText = document.getElementById('connText');
