@@ -9,3 +9,16 @@ contextBridge.exposeInMainWorld('cmcUpdate', {
   // launch the installer (the app then quits so the upgrade can proceed).
   install: () => ipcRenderer.invoke('cmc:install-update'),
 });
+
+// Mouse back/forward side buttons. Windows delivers them as WM_APPCOMMAND, which
+// Electron raises as `app-command` in the MAIN process only: the renderer never
+// sees a mouse event for them, so the page cannot handle them without this
+// bridge. public/shortcuts.js subscribes and moves through the app's own history.
+contextBridge.exposeInMainWorld('cmcNav', {
+  onNav: (cb) => {
+    if (typeof cb !== 'function') return;
+    ipcRenderer.on('cmc:nav', (_event, direction) => {
+      if (direction === 'back' || direction === 'forward') cb(direction);
+    });
+  },
+});

@@ -344,6 +344,39 @@ Note `~/.gitconfig` also has `url."https://github.com/".insteadOf = git@github.c
 SSH remotes to HTTPS. Any future SSH-key-per-account idea has to account for that rewrite, or it
 silently ends up back on the shared HTTPS credential path.
 
+## Shortcuts, app history and the Settings popup (`public/shortcuts.js`)
+Added 2026-07-30 (issue #22). One module owns the keyboard bindings, the mouse side buttons, the
+app's back/forward history and the Settings popup.
+- **`BINDINGS` is the single source of truth.** The key handler matches against it AND the guide in
+  Settings is rendered from it, so a binding cannot drift from its documentation. Each entry carries
+  `combos` (a list of ALTERNATIVES, each a list of keys pressed together, so the guide renders
+  "Mouse back or Alt+←" without guessing where a `+` belongs), a `label`, a `match(e)` predicate and
+  a `run()`. Adding a shortcut is one entry, nothing else.
+- **Shortcuts drive the REAL buttons** (`statsBtn.click()`, `newSessionOpenBtn.click()`), never a
+  copy of their open/close and focus logic, so a shortcut and a click cannot diverge.
+- **The global handler stands down** while focus is in an `input`/`select`/`textarea`, while
+  Ctrl/Meta is held, and while ANY `.pop-backdrop` is visible. Each dialog keeps its own Esc
+  handler, so Esc still closes the topmost dialog; the global Esc only leaves a session.
+- **History** is a small stack of `{view:'sessions'}` / `{view:'detail', id}`. `store.js` gained
+  `onNav` plus a `setNavQuiet` flag: back/forward replay an entry through the SAME public
+  `selectSession`/`clearSession` the UI calls (which `index.html` wraps to refresh the breadcrumb),
+  with the notification muted so a replay is not recorded as a new entry. That is why the crumb
+  cannot desync from a history move. A `detail` entry whose session has since been pruned falls back
+  to the board rather than opening an empty detail view.
+- **Mouse back/forward has two delivery paths.** In the packaged app Windows sends WM_APPCOMMAND,
+  which Electron raises as `app-command` in the MAIN process only (the renderer never sees a mouse
+  event for those buttons), so `desktop/main.mjs` forwards it over `desktop/preload.cjs`
+  (`window.cmcNav.onNav`). In a plain browser the same handler runs off `auxclick`/`mouseup` buttons
+  3 and 4. Deliberately NOT `webContents.goBack()`: the window loads one URL, so browser history is
+  empty and the app's navigation is board <-> session instead.
+- **Settings persists** to `localStorage.cmcSettings`, which is a deliberate difference from the
+  board's Show filters (fixed at startup on purpose, because a stale stored filter used to override
+  the default silently). An explicitly toggled setting is exactly the thing that should survive a
+  restart. It is also the home for future settings: add a `.set-section` to the popup body.
+- **Session cards are keyboard reachable** (`tabindex="0"`, `role="button"`, Enter/Space jumps to
+  the terminal, `:focus-visible` ring). Before this, Tab skipped every card and the primary action
+  was mouse-only.
+
 ## Verification tooling
 - `node scripts/smoke-server.mjs` - hermetic temp HOME, boots the server, checks the endpoints, hook
   ingestion, statusline ingestion, registry reconciliation and launch command shapes. Runs in CI.
@@ -359,8 +392,10 @@ silently ends up back on the shared HTTPS credential path.
   no build, so it is cheap and runs in CI.
 - `node scripts/render-check.mjs` - drives a REAL Chromium over the Chrome DevTools Protocol using
   Node's built-in global `WebSocket` (no dependencies, nothing installed), asserting card geometry
-  across viewport widths, the filters, the popup and the account picker, and collecting console
-  errors. SKIPS with exit 0 when no browser is present, so it is deliberately not in CI.
+  across viewport widths, the filters, the popups, the account picker, the Take Control dialog, and
+  the shortcuts (real history transitions: drill in, back, forward, Alt+Left, a no-op back at the
+  start, plus the guards that stop a bare letter firing while typing or behind a dialog), and
+  collecting console errors. SKIPS with exit 0 when no browser is present, so it is deliberately not in CI.
   `--shot <file>` saves a screenshot. This exists because a CSS grid blowout (see the card notes
   above) was invisible to code review and took one real measurement to find. Two traps it encodes:
   `chrome --dump-dom` never returns on this page because the open SSE connection means load never
@@ -384,6 +419,17 @@ caps at 60 chars) and then used twice: as the Windows Terminal tab title, and as
 `/resume` picker and the terminal title. Renaming later is a plain `/rename` inside that session;
 Mission Control has no rename-after-the-fact affordance on purpose (there is no way to push a name
 into a live session without keystroke injection).
+
+**A `/rename` DOES reach the board, and `session.title` is not write-once** (fixed 2026-07-30,
+issue #23). Two sources report a session's CURRENT name and therefore see a rename immediately: the
+registry's `name` and the statusline payload's `session_name`. Both go through `applyLiveName()`,
+which adopts a CHANGED name and ignores an empty or unchanged one, so a registry file carrying no
+name cannot blank a title. `applyLaunchName()` stays deliberately fill-only: it is the one-time
+`terminal.bindSession()` hint joining a `claude --name` launch to its session id, and it must never
+overwrite what the session itself reports. Before the fix every writer was guarded on
+`!session.title`, so the FIRST name a session ever had won forever: a session that Claude Code
+auto-named `missioncontrolcenter-62` at startup kept that label through two renames while the
+terminal tab and the prompt box both showed the new one.
 
 The name reaches the board through the existing deferred join: `/launch` has no session id yet, so
 the sanitized name is stored as `launchName` on the `managedTabs` entry, `terminal.bindSession()`

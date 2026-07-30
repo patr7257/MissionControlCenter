@@ -479,6 +479,46 @@ try {
   check('registry name is applied to a session with no title yet', r1 && r1.title === 'registry busy test');
   check('registry file presence marks the session live', r1 && r1.live === true);
 
+  // A LATER name change must be adopted: `/rename` inside a session updates the
+  // registry's `name`, and the board used to ignore it forever because every
+  // writer was guarded on the title being empty (issue #23).
+  writeRegistryFile('smoke-r1', {
+    pid: process.pid,
+    sessionId: 'smoke-r1',
+    cwd: 'C:/tmp/smoke-r1',
+    status: 'busy',
+    statusUpdatedAt: Date.now(),
+    name: 'renamed by hand',
+  });
+  await registrySettle();
+  const snapR1b = await readSnapshot();
+  const r1b = snapR1b && snapR1b.sessions.find((s) => s.id === 'smoke-r1');
+  check('a registry name change is adopted, so /rename reaches the board', r1b && r1b.title === 'renamed by hand');
+
+  // ...but a registry file with no name at all must not blank the title.
+  writeRegistryFile('smoke-r1', {
+    pid: process.pid,
+    sessionId: 'smoke-r1',
+    cwd: 'C:/tmp/smoke-r1',
+    status: 'busy',
+    statusUpdatedAt: Date.now(),
+  });
+  await registrySettle();
+  const snapR1c = await readSnapshot();
+  const r1c = snapR1c && snapR1c.sessions.find((s) => s.id === 'smoke-r1');
+  check('a registry file with no name does not clear the existing title', r1c && r1c.title === 'renamed by hand');
+
+  // The statusline payload carries session_name and also tracks /rename.
+  await fetch(`${BASE}/statusline`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: 'smoke-r1', cwd: 'C:/tmp/smoke-r1', session_name: 'renamed via statusline' }),
+  });
+  await sleep(200);
+  const snapR1d = await readSnapshot();
+  const r1d = snapR1d && snapR1d.sessions.find((s) => s.id === 'smoke-r1');
+  check('a statusline session_name change is adopted too', r1d && r1d.title === 'renamed via statusline');
+
   // (b) a 'waiting' registry file must NOT clobber needs-permission.
   await fetch(`${BASE}/event`, {
     method: 'POST',
