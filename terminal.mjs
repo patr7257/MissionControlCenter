@@ -9,6 +9,84 @@ import { spawn, spawnSync } from 'node:child_process';
 
 export const WT_WINDOW = 'cmc';
 
+// Per-session GitHub account registry. `gh auth switch` writes the active
+// account to one machine-wide file, so concurrent sessions fight over it;
+// GH_CONFIG_DIR is per-process, so pinning it (plus the git identity vars)
+// in the env of the hosted PowerShell command fully isolates a session's
+// account from every other session's.
+// configDir is deliberately never exposed over HTTP (see the /repos handler
+// in server.mjs): only key/label/login/matchPath/isDefault are safe to send
+// to the browser.
+export const GH_ACCOUNTS = [
+  {
+    key: 'personal',
+    label: 'patr7257 (personal)',
+    login: 'patr7257',
+    configDir: process.env.CMC_GH_DIR_PERSONAL || path.join(os.homedir(), '.config', 'gh-personal'),
+    email: 'patr7257@gmail.com',
+    name: 'Patrick Røbel',
+    isDefault: true,
+  },
+  {
+    key: 'work',
+    label: 'przrm (ZRM work)',
+    login: 'przrm',
+    configDir: process.env.CMC_GH_DIR_WORK || path.join(os.homedir(), '.config', 'gh-work'),
+    email: 'pr@zrm.dk',
+    name: 'Patrick Røbel',
+    matchPath: '2-ZRM',
+  },
+];
+
+function defaultGhAccount() {
+  return GH_ACCOUNTS.find((a) => a.isDefault) || GH_ACCOUNTS[0];
+}
+
+// Matches a path SEGMENT (bounded by / or \, case-insensitive) so a repo
+// literally named 'my-2-ZRMish' does not match the '2-ZRM' rule. repoPath is
+// normalized to forward slashes first so both separators are handled the
+// same way regardless of platform.
+function pathHasSegment(repoPath, segment) {
+  if (!repoPath || !segment) return false;
+  const normalized = String(repoPath).replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
+  const want = String(segment).toLowerCase();
+  return parts.some((p) => p.toLowerCase() === want);
+}
+
+// The rule Patrick asked for: anything under ~/repos/2-ZRM/ is work, everything
+// else is personal. Never trust a key from HTTP for this; this only ever
+// consults the registry's own matchPath fields.
+export function defaultAccountForPath(repoPath) {
+  for (const account of GH_ACCOUNTS) {
+    if (account.matchPath && pathHasSegment(repoPath, account.matchPath)) return account;
+  }
+  return defaultGhAccount();
+}
+
+// Security boundary: the only way an accountKey reaches the shell command
+// built below is by matching one of these fixed registry entries. A key from
+// an HTTP request body is never used for anything else.
+export function resolveAccount(key) {
+  if (!key) return null;
+  return GH_ACCOUNTS.find((a) => a.key === key) || null;
+}
+
+// Env-export prefix applied to the hosted PowerShell command so the account
+// only ever applies to that one tab. Git identity vars are set alongside
+// GH_CONFIG_DIR on purpose: without them a session overridden to one account
+// would still commit as whatever the shared global git identity is.
+function ghEnvPrefix(account) {
+  if (!account) return '';
+  return (
+    '$env:GH_CONFIG_DIR=' + psQuote(account.configDir) + '; ' +
+    '$env:GIT_AUTHOR_NAME=' + psQuote(account.name) + '; ' +
+    '$env:GIT_AUTHOR_EMAIL=' + psQuote(account.email) + '; ' +
+    '$env:GIT_COMMITTER_NAME=' + psQuote(account.name) + '; ' +
+    '$env:GIT_COMMITTER_EMAIL=' + psQuote(account.email) + '; '
+  );
+}
+
 // Soft cap for managedTabs (see the growth comment below). Once the array
 // crosses this, every push tries the safe reset first (clearStaleManagedTabsIfWindowGone,
 // a no-op while the managed window is still open) and only warns if that did
@@ -139,10 +217,13 @@ export function sanitizeSessionName(name) {
 // that loads the developer's PowerShell profile and leaves a usable prompt (with
 // the scrollback intact) when Claude exits, instead of the tab vanishing.
 // Single quotes are the PowerShell literal form, so a `'` inside the name is
-// escaped by doubling it.
-function psClaudeCommand(name) {
-  if (!name) return 'claude';
-  return "claude --name '" + name.replace(/'/g, "''") + "'";
+// escaped by doubling it. `account`, when given, is prefixed as env exports
+// (GH_CONFIG_DIR plus the four git identity vars) so the account applies only
+// to this one tab; see ghEnvPrefix above.
+function psClaudeCommand(name, account) {
+  const prefix = ghEnvPrefix(account);
+  if (!name) return prefix + 'claude';
+  return prefix + "claude --name '" + name.replace(/'/g, "''") + "'";
 }
 
 // Synchronous check: is any WindowsTerminal.exe process running at all? Fails
@@ -276,12 +357,19 @@ export function listRepos() {
 // and the terminal title) and the tab title, so the tab, Claude and the session card
 // all agree on one label. The sanitised value is stored on the managedTabs entry so
 // bindSession() can hand it back to the server once the session id exists.
-export function launchSession(repoPath, title, name) {
+// `accountKey`, when given and valid, pins the launched session to that
+// GitHub account (see GH_ACCOUNTS/resolveAccount above); otherwise the
+// account is derived from repoPath (defaultAccountForPath). Never trust
+// accountKey blindly: resolveAccount() only ever returns a fixed registry
+// entry or null, so an invalid/garbage key silently falls back to the path
+// default rather than reaching the command string.
+export function launchSession(repoPath, title, name, accountKey) {
   try {
     clearStaleManagedTabsIfWindowGone();
+    const account = resolveAccount(accountKey) || defaultAccountForPath(repoPath);
     const launchName = sanitizeSessionName(name);
     const tabTitle = launchName || title;
-    const psCommand = psClaudeCommand(launchName);
+    const psCommand = psClaudeCommand(launchName, account);
     const args = [
       '-w', WT_WINDOW, 'nt', '-d', repoPath, '--title', tabTitle,
       'powershell.exe', '-NoExit', '-Command', psCommand,
@@ -296,14 +384,14 @@ export function launchSession(repoPath, title, name) {
     if (process.env.CMC_DRY_RUN) {
       managedTabs.push(entry);
       enforceManagedTabsCap();
-      return { ok: true, command, dryRun: true };
+      return { ok: true, command, account: account.login, dryRun: true };
     }
 
     spawnWt(args);
     managedTabs.push(entry);
     saveManagedTabs();
     enforceManagedTabsCap();
-    return { ok: true, command };
+    return { ok: true, command, account: account.login };
   } catch (error) {
     return { ok: false, error: String(error) };
   }
@@ -388,12 +476,16 @@ export function reopenSession(sessionId, cwd, title) {
     // its active tab title.
     const sanitizedTitle = sanitizeSessionName(title);
     const tabTitle = sanitizedTitle || 'resume:' + sessionId;
+    // A resumed session must not silently fall back to whatever account the
+    // shared global git config happens to have: resolve it from the session's
+    // own cwd, same rule as a fresh launch.
+    const account = defaultAccountForPath(cwd);
     // PowerShell hosts the tab for the same reasons as launchSession (profile
     // loads, the tab survives Claude exiting). No --name here: the resumed
     // session already carries whatever display name it was given.
     const args = [
       '-w', WT_WINDOW, 'nt', '-d', cwd, '--title', tabTitle,
-      'powershell.exe', '-NoExit', '-Command', 'claude --resume ' + sessionId,
+      'powershell.exe', '-NoExit', '-Command', ghEnvPrefix(account) + 'claude --resume ' + sessionId,
     ];
     // Quote the cwd (index 4), title (index 6) and the PowerShell command
     // (index 10): the values that may contain spaces. Everything else, including
@@ -405,7 +497,7 @@ export function reopenSession(sessionId, cwd, title) {
     if (process.env.CMC_DRY_RUN) {
       managedTabs.push(entry);
       enforceManagedTabsCap();
-      return { ok: true, mode: 'reattached', command, dryRun: true };
+      return { ok: true, mode: 'reattached', command, account: account.login, dryRun: true };
     }
 
     spawnWt(args);
@@ -413,7 +505,7 @@ export function reopenSession(sessionId, cwd, title) {
     saveManagedTabs();
     enforceManagedTabsCap();
     bringToForeground(tabTitle);
-    return { ok: true, mode: 'reattached', command };
+    return { ok: true, mode: 'reattached', command, account: account.login };
   } catch (error) {
     return { ok: false, error: String(error) };
   }

@@ -105,6 +105,24 @@ try {
   check('GET /repos returns 200', repos.status === 200);
   const reposBody = await repos.json();
   check('GET /repos returns a { root, tree } folder tree', reposBody && typeof reposBody.root === 'string' && Array.isArray(reposBody.tree));
+  check(
+    'GET /repos exposes an accounts array with both registry keys and no configDir',
+    Array.isArray(reposBody.accounts) &&
+      reposBody.accounts.some((a) => a.key === 'personal') &&
+      reposBody.accounts.some((a) => a.key === 'work') &&
+      reposBody.accounts.every((a) => !('configDir' in a))
+  );
+
+  // GH_CONFIG_DIR plus the four git identity vars must precede `claude` in the
+  // generated command, whichever account it resolved to.
+  function hasGhEnvPrefix(command) {
+    return (
+      typeof command === 'string' &&
+      /\$env:GH_CONFIG_DIR='[^']*';\s*\$env:GIT_AUTHOR_NAME='[^']*';\s*\$env:GIT_AUTHOR_EMAIL='[^']*';\s*\$env:GIT_COMMITTER_NAME='[^']*';\s*\$env:GIT_COMMITTER_EMAIL='[^']*';\s*claude/.test(
+        command
+      )
+    );
+  }
 
   // Launch command shape: the tab is hosted by PowerShell (profile loads, tab
   // survives Claude exiting) and an optional session name is passed through as
@@ -120,16 +138,63 @@ try {
     launchNamed &&
       typeof launchNamed.command === 'string' &&
       launchNamed.command.includes('--title "smoke name"') &&
-      launchNamed.command.includes('powershell.exe -NoExit -Command "claude --name \'smoke name\'"')
+      launchNamed.command.includes('claude --name \'smoke name\'"') &&
+      launchNamed.command.includes('powershell.exe -NoExit -Command "$env:GH_CONFIG_DIR')
   );
+  check('POST /launch under a non-2-ZRM path resolves to the personal account', launchNamed && launchNamed.account === 'patr7257');
+  check('POST /launch sets GH_CONFIG_DIR and the four git identity vars before claude', hasGhEnvPrefix(launchNamed.command));
+
   const launchPlain = await (await fetch(`${BASE}/launch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ repo: 'C:/tmp/smoke-repo', title: 'smoke-repo' }),
   })).json();
   check(
-    'POST /launch without a name runs bare claude under PowerShell',
-    launchPlain && launchPlain.command && launchPlain.command.endsWith('powershell.exe -NoExit -Command "claude"')
+    'POST /launch without a name runs bare claude under PowerShell, prefixed with the account env vars',
+    launchPlain && launchPlain.command && launchPlain.command.endsWith('claude"') && hasGhEnvPrefix(launchPlain.command)
+  );
+
+  // Path-based account resolution: a repo under a 2-ZRM segment resolves to
+  // przrm, anything else resolves to patr7257, when no account is given.
+  const launchZrmPath = await (await fetch(`${BASE}/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: 'C:/repos/2-ZRM/customers/some-app', title: 'zrm-app' }),
+  })).json();
+  check('POST /launch under a 2-ZRM path resolves to the work account (przrm)', launchZrmPath && launchZrmPath.account === 'przrm');
+
+  // Explicit account override wins in both directions.
+  const launchOverrideToWork = await (await fetch(`${BASE}/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: 'C:/tmp/smoke-repo', title: 'override-work', account: 'work' }),
+  })).json();
+  check('POST /launch with an explicit work override wins over a non-2-ZRM path', launchOverrideToWork && launchOverrideToWork.account === 'przrm');
+  const launchOverrideToPersonal = await (await fetch(`${BASE}/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: 'C:/repos/2-ZRM/customers/some-app', title: 'override-personal', account: 'personal' }),
+  })).json();
+  check(
+    'POST /launch with an explicit personal override wins over a 2-ZRM path',
+    launchOverrideToPersonal && launchOverrideToPersonal.account === 'patr7257'
+  );
+
+  // An invalid/garbage account value must fall back to the path default and
+  // must never reach the generated command string as-is (it is not one of
+  // the fixed registry keys, so it can never be interpolated into the shell).
+  const launchGarbageAccount = await (await fetch(`${BASE}/launch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: 'C:/tmp/smoke-repo', title: 'garbage-account', account: "x'; rm -rf /" }),
+  })).json();
+  check(
+    'POST /launch with a garbage account value falls back to the path default (personal)',
+    launchGarbageAccount && launchGarbageAccount.account === 'patr7257'
+  );
+  check(
+    'POST /launch with a garbage account value never lets it reach the command string',
+    launchGarbageAccount && typeof launchGarbageAccount.command === 'string' && !launchGarbageAccount.command.includes("rm -rf")
   );
 
   await fetch(`${BASE}/event`, {

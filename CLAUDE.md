@@ -265,6 +265,53 @@ Design record: `https://claude.ai/code/artifact/d611c0ef-2208-4da3-90fb-4334b3d4
 - The four header stat tiles (`working`/`done`/`steps`/`elapsed`) are still subagent-scoped, so they
   read 0 on the board itself. Pre-existing, untouched, and worth revisiting.
 
+## GitHub account per session (why `gh auth switch` must never be used here)
+Patrick runs several sessions at once across two GitHub accounts, `patr7257` (personal) and `przrm`
+(ZRM work). `gh auth switch` writes the active account to ONE machine-wide file
+(`%AppData%\Roaming\GitHub CLI\hosts.yml`), and `~/.gitconfig` routes github.com credentials through
+`gh auth git-credential`, so concurrent sessions fought over it and pushes authenticated as the
+wrong account. Do not "fix" an account problem with `gh auth switch`; it corrupts every other
+running session.
+
+The isolation primitive is `GH_CONFIG_DIR`, which is per process. Two config dirs exist, each with
+its own login: `~/.config/gh-personal` and `~/.config/gh-work`.
+
+Two layers, so the right account is used whether or not anything sets an env var:
+- **Machine default, by directory.** `~/.gitconfig` pins the credential helper to the personal
+  config dir, and an `includeIf "gitdir/i:C:/Users/pr/repos/2-ZRM/"` at the END of the file pulls in
+  `~/.gitconfig-zrm`, which resets the helper list and pins the work dir plus the `pr@zrm.dk`
+  identity. The include must stay last: `credential.helper` is MULTI-valued and accumulates, so an
+  empty `helper =` line is what resets the inherited list. Without the reset the personal helper
+  answers first and wins. So: `~/repos/2-ZRM/**` is work, everything else is personal, with no
+  session awareness at all.
+- **Per session, at launch.** `terminal.mjs` owns `GH_ACCOUNTS` (derived from `os.homedir()`,
+  overridable via `CMC_GH_DIR_PERSONAL` / `CMC_GH_DIR_WORK`), `defaultAccountForPath()` (matches
+  `matchPath` on path-segment boundaries, case-insensitively, so a repo named `my-2-ZRMish` does not
+  match) and `resolveAccount()`. `launchSession(repo, title, name, accountKey)` prepends
+  `$env:GH_CONFIG_DIR` plus the four `GIT_AUTHOR_*`/`GIT_COMMITTER_*` vars to the hosted PowerShell
+  command, so that tab alone is pinned. Setting the identity vars too is deliberate: otherwise an
+  overridden session would authenticate as one account and commit as the other. `reopenSession`
+  applies the same prefix, resolved from the session's cwd. `resolveAccount()` is the security
+  boundary: only a fixed registry key is ever accepted, since the value lands in a shell command.
+  `GET /repos` exposes `accounts` (never the config dir paths) and the New session popup renders a
+  GitHub account dropdown that auto-follows the selected folder and can be overridden per launch.
+
+Note `~/.gitconfig` also has `url."https://github.com/".insteadOf = git@github.com:`, which rewrites
+SSH remotes to HTTPS. Any future SSH-key-per-account idea has to account for that rewrite, or it
+silently ends up back on the shared HTTPS credential path.
+
+## Verification tooling
+- `node scripts/smoke-server.mjs` - hermetic temp HOME, boots the server, checks the endpoints, hook
+  ingestion, statusline ingestion, registry reconciliation and launch command shapes. Runs in CI.
+- `node scripts/render-check.mjs` - drives a REAL Chromium over the Chrome DevTools Protocol using
+  Node's built-in global `WebSocket` (no dependencies, nothing installed), asserting card geometry
+  across viewport widths, the filters, the popup and the account picker, and collecting console
+  errors. SKIPS with exit 0 when no browser is present, so it is deliberately not in CI.
+  `--shot <file>` saves a screenshot. This exists because a CSS grid blowout (see the card notes
+  above) was invisible to code review and took one real measurement to find. Two traps it encodes:
+  `chrome --dump-dom` never returns on this page because the open SSE connection means load never
+  completes, and the popup's visibility lives on `#newSessionBackdrop`, not on the panel.
+
 ## Named sessions (`claude --name`)
 The New session popup has an optional Name field. A name is sanitized in `terminal.mjs`
 (`sanitizeSessionName`: strips `" \` ; & | < >`, collapses whitespace, drops a trailing backslash,

@@ -266,6 +266,9 @@
   background-position: right 12px center, right 7px center; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
 }
 .inp { width: 100%; }
+/* A .sel that is a direct child of .fld (the GitHub account field, unlike the
+   folder chain's multiple .sel inside .chain) goes full width like .inp. */
+.fld > .sel { width: 100%; }
 .inp::placeholder { color: var(--muted); }
 .sel:focus, .inp:focus, .gobtn:focus-visible, .ghostbtn:focus-visible {
   outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,156,255,0.25);
@@ -281,12 +284,15 @@
 
 /* "New session" (top bar) and "Launch" (popup footer) share this treatment. */
 .gobtn {
+  white-space: nowrap;
   background: linear-gradient(180deg, #59e79a, var(--go));
   color: #052312; border: 0; border-radius: 9px; padding: 7px 14px;
   font: 650 12.5px/1.4 var(--sans); cursor: pointer;
   box-shadow: 0 2px 10px rgba(61,220,132,0.28);
 }
-.gobtn::before { content: "+ "; font-weight: 700; }
+/* The + belongs only to the header's "New session" affordance. On the popup's
+   narrow Launch button it wrapped onto a second line. */
+#newSessionOpenBtn::before { content: "+ "; font-weight: 700; }
 .gobtn:hover { filter: brightness(1.06); }
 
 /* ---- Top-bar quota meters (5h / 7d), two 40px conic rings. ---- */

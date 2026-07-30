@@ -1217,8 +1217,18 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'GET' && url === '/repos') {
     const repos = terminal.listRepos();
+    // accounts is the registry projected to what the UI needs: never the
+    // configDir (a local filesystem path with no reason to leave the machine)
+    // or anything else secret.
+    const accounts = terminal.GH_ACCOUNTS.map((a) => ({
+      key: a.key,
+      label: a.label,
+      login: a.login,
+      matchPath: a.matchPath || null,
+      isDefault: !!a.isDefault,
+    }));
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(repos));
+    res.end(JSON.stringify({ ...repos, accounts }));
     return;
   }
 
@@ -1237,7 +1247,11 @@ const server = http.createServer((req, res) => {
         // `name` is optional: when set it becomes the Claude display name
         // (claude --name) and the tab title, and lands on the session record
         // once the first hook lets terminal.bindSession() join the two.
-        result = terminal.launchSession(repo, title, payload.name);
+        // `account` is optional: when set (and valid) it pins the session to
+        // that GitHub account; terminal.launchSession() does the validation
+        // and falls back to the path default on its own, so an invalid or
+        // absent key is never handled here.
+        result = terminal.launchSession(repo, title, payload.name, payload.account);
       } catch (error) {
         result = { ok: false, error: String(error) };
       }

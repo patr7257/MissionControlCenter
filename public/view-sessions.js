@@ -375,6 +375,14 @@
   var DEFAULT_REPO_CHAIN = ['2-ZRM', 'customers'];
   var repoRoot = '';
   var repoTree = [];
+  // GitHub account picker (see GH_ACCOUNTS in terminal.mjs). Populated from
+  // /repos's `accounts` field: [{ key, label, login, matchPath, isDefault }],
+  // never the config dir. `accountManualOverride` is set the moment the user
+  // touches the dropdown themselves, so a later folder-chain change never
+  // stomps a deliberate choice; it resets to auto-follow every time the popup
+  // is reopened.
+  var accounts = [];
+  var accountManualOverride = false;
   function oneOption(value, text) { var o = document.createElement('option'); o.value = value; o.textContent = text; return o; }
   function baseName(p) {
     var s = String(p || '').replace(/[\\/]+$/, '');
@@ -382,6 +390,47 @@
     return i >= 0 ? s.slice(i + 1) : s;
   }
   function selectorsEl() { return document.getElementById('newSessionSelectors'); }
+
+  // Mirrors terminal.mjs's defaultAccountForPath: a path SEGMENT match
+  // (bounded by / or \, case-insensitive), never a bare substring, so a repo
+  // literally named 'my-2-ZRMish' does not match a '2-ZRM' rule. The rule
+  // itself is read from the `accounts` data (matchPath), never hardcoded here.
+  function pathHasSegment(p, segment) {
+    if (!p || !segment) return false;
+    var parts = String(p).replace(/\\/g, '/').split('/').filter(function (x) { return x; });
+    var want = String(segment).toLowerCase();
+    for (var i = 0; i < parts.length; i++) { if (parts[i].toLowerCase() === want) return true; }
+    return false;
+  }
+  function pickAutoAccount(p) {
+    for (var i = 0; i < accounts.length; i++) {
+      if (accounts[i].matchPath && pathHasSegment(p, accounts[i].matchPath)) return accounts[i];
+    }
+    for (var j = 0; j < accounts.length; j++) { if (accounts[j].isDefault) return accounts[j]; }
+    return accounts[0] || null;
+  }
+  // Renders the account <select> from `accounts`, preserving the current
+  // selection when it is still a valid key (so a later refresh does not
+  // silently reset a choice already made).
+  function populateAccountSelect() {
+    var sel = document.getElementById('newSessionAccount');
+    if (!sel) return;
+    var prev = sel.value;
+    sel.innerHTML = '';
+    accounts.forEach(function (a) {
+      var o = document.createElement('option'); o.value = a.key; o.textContent = a.label; sel.appendChild(o);
+    });
+    if (prev && accounts.some(function (a) { return a.key === prev; })) sel.value = prev;
+  }
+  // Auto-select follows the folder chain unless the user has manually
+  // overridden the dropdown this popup session.
+  function autoSelectAccountForPath(p) {
+    if (accountManualOverride) return;
+    var sel = document.getElementById('newSessionAccount');
+    if (!sel || !accounts.length) return;
+    var acc = pickAutoAccount(p);
+    if (acc) sel.value = acc.key;
+  }
 
   // Keeps the popup footer's path readout in sync with whatever the chain
   // currently resolves to (mirrors the design specimen's .pop-foot .path).
@@ -410,6 +459,7 @@
       host.appendChild(makeSelect(node.children));
     }
     updateLaunchPath();
+    autoSelectAccountForPath(currentLaunchPath());
   }
   // Walk DEFAULT_REPO_CHAIN, selecting one level per name and letting the normal
   // change handler spawn the next dropdown, so the preselected chain is identical to
@@ -439,11 +489,13 @@
       s.appendChild(oneOption('', 'No repos found'));
       host.appendChild(s);
       updateLaunchPath();
+      autoSelectAccountForPath(currentLaunchPath());
       return;
     }
     host.appendChild(makeSelect(repoTree));
     applyDefaultChain();
     updateLaunchPath();
+    autoSelectAccountForPath(currentLaunchPath());
   }
   function loadRepos() {
     var host = selectorsEl();
@@ -451,10 +503,16 @@
     // Fetched lazily on first popup open (see openNewSessionPopup), not from
     // activate(): once the tree is loaded and a real chain is on screen,
     // refetching would only wipe whatever the user just picked.
-    if (repoTree.length && host.children.length && !host.children[0].disabled) return;
+    if (repoTree.length && host.children.length && !host.children[0].disabled) {
+      populateAccountSelect();
+      autoSelectAccountForPath(currentLaunchPath());
+      return;
+    }
     fetch('/repos').then(function (res) { return res.json(); }).then(function (data) {
       repoRoot = (data && data.root) || '';
       repoTree = (data && data.tree) || [];
+      accounts = (data && data.accounts) || [];
+      populateAccountSelect();
       renderSelectors();
     }).catch(function () {
       var host = selectorsEl();
@@ -476,6 +534,7 @@
     var btn = document.getElementById('newSessionBtn');
     var feedback = document.getElementById('newSessionFeedback');
     var nameEl = document.getElementById('newSessionName');
+    var accSel = document.getElementById('newSessionAccount');
     var repoPath = currentLaunchPath();
     if (!repoPath) return;
     var repoName = baseName(repoPath);
@@ -483,15 +542,20 @@
     // terminal tab title, so the tab, the Claude prompt box and the card all agree.
     var name = nameEl ? String(nameEl.value || '').trim() : '';
     var label = name || repoName;
+    var accountKey = accSel ? accSel.value : '';
     btn.disabled = true;
     if (feedback) feedback.textContent = 'Launching ' + label + '...';
     fetch('/launch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: repoPath, title: label, name: name })
+      body: JSON.stringify({ repo: repoPath, title: label, name: name, account: accountKey })
     }).then(function (res) { return res.json(); }).then(function (data) {
       var failed = data && data.ok === false;
-      if (feedback) feedback.textContent = failed ? 'Launch failed' : 'Launched ' + label;
+      if (feedback) {
+        feedback.textContent = failed
+          ? 'Launch failed'
+          : 'Launched ' + label + (data && data.account ? (' as ' + data.account) : '');
+      }
       if (!failed) {
         if (nameEl) nameEl.value = '';
         // A successful launch closes the popup; a failed one leaves it open
@@ -516,8 +580,12 @@
     var backdrop = document.getElementById('newSessionBackdrop');
     if (!backdrop) return;
     backdrop.style.display = 'flex';
+    // Reopening the popup always resets to auto-follow: a manual override
+    // only lasts for the popup session it was made in.
+    accountManualOverride = false;
     loadRepos();
     updateLaunchPath();
+    autoSelectAccountForPath(currentLaunchPath());
     var nameEl = document.getElementById('newSessionName');
     if (nameEl) nameEl.focus();
     document.addEventListener('keydown', onPopupKeydown);
@@ -542,6 +610,8 @@
         if (e.key === 'Enter' && !btn.disabled) launchSession();
       });
     }
+    var accSel = document.getElementById('newSessionAccount');
+    if (accSel) accSel.addEventListener('change', function () { accountManualOverride = true; });
     var cancelBtn = document.getElementById('newSessionCancelBtn');
     if (cancelBtn) cancelBtn.addEventListener('click', closeNewSessionPopup);
     var backdrop = document.getElementById('newSessionBackdrop');
