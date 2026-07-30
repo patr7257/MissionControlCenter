@@ -80,14 +80,44 @@ function isNewer(a, b) {
 // gh CLI (same private-repo, no-baked-token model as findNewerRelease). Returns
 // the absolute path to the downloaded .msi, or null on any failure (no gh,
 // offline, not authed, no MSI asset, timeout). Never throws.
+export const UPDATE_DIR_PREFIX = 'cmc-update-';
+
+// Each download used to get a fresh mkdtemp dir that nothing ever removed, so an
+// MSI (over 100 MB) was left behind per attempt: 8 dirs holding 778 MB were found
+// on the developer's machine. Sweep the previous ones before adding another.
+// Best effort and never throws: a dir still locked by a running installer is
+// skipped and cleaned on a later run. `keepDir` is the one we just created.
+export function cleanupOldUpdateDirs(keepDir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(os.tmpdir(), { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(UPDATE_DIR_PREFIX)) continue;
+    const full = path.join(os.tmpdir(), entry.name);
+    if (keepDir && path.resolve(full) === path.resolve(keepDir)) continue;
+    try {
+      fs.rmSync(full, { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      // in use by an installer that is still running: leave it for next time
+    }
+  }
+  return removed;
+}
+
 export async function downloadReleaseMsi(tag) {
   if (!tag) return null;
   let dir;
   try {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmc-update-'));
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), UPDATE_DIR_PREFIX));
   } catch {
     return null;
   }
+  cleanupOldUpdateDirs(dir);
   const ok = await new Promise((resolve) => {
     let settled = false;
     const finish = (v) => {

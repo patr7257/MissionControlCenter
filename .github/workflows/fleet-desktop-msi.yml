@@ -120,6 +120,15 @@ jobs:
         with:
           node-version: 22
 
+      # The one check that needs a real Windows shell: it spawns the updater's
+      # install command and asserts the MSI path reaches msiexec unmangled. Node
+      # quoting plus cmd.exe quoting once shipped an updater that downloaded the
+      # MSI and then failed with "This installation package could not be opened"
+      # (issue #18). Skips with exit 0 off Windows, so it is a no-op elsewhere.
+      - name: Check the updater install command
+        working-directory: .
+        run: node scripts/check-installer-launch.mjs
+
       - name: Stamp the app version
         run: npm version ${{ needs.version.outputs.version }} --no-git-tag-version --allow-same-version
 
