@@ -66,7 +66,7 @@ transparent.
 - `node start.mjs` (installs hooks, starts server, opens http://localhost:4317)
 - `node stop.mjs` (removes hooks, stops server)
 
-## Multi-session manager (built; pending live validation)
+## Multi-session manager (built, and validated live on 2026-07-30)
 Discovery uses user-level Claude Code hooks (SessionStart / UserPromptSubmit / Stop /
 Notification / SessionEnd) that fire for every session, plus a backfill scan of
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`, `~/.claude/history.jsonl`, and live-status
@@ -158,16 +158,34 @@ Still pending (not code-complete):
   Electron-as-node wrapper exists in `desktop/assets/`, mirroring `send-event.mjs.cmd`, and
   `desktop/main.mjs` sets `CMC_STATUSLINE_COMMAND` to it the way it already sets
   `CMC_HOOK_COMMAND`. Running the repo copy (`node start.mjs`) is unaffected and does feed it.
-- **Live focus/reattach validation on the real machine.** Confirmed by hand on 2026-07-30, after the
-  semicolon fix: `launchSession()` opens EXACTLY ONE tab in the managed `cmc` window (title = the
-  name, `claude.exe --name "<name>"` running as the hosted PowerShell's child, no junk tabs, no
-  0x80070002), and `reopenSession()` really reattaches (`claude.exe --resume <id>` running in a fresh
-  tab, that tab active in the window afterwards). Note Claude Code REPLACES our `--title` with the
-  resumed session's own name once it loads, so `bringToForeground()`'s title match can miss on a
-  reattach whose stored title differs from the session's real name; it is best effort and
-  `wt focus-tab` has already switched tabs by then. Still unconfirmed by hand: `wt focus-tab` on a
-  cold window, and whether the `SetForegroundWindow` nudge raises the window versus just flashing
-  the taskbar icon when the app is in the background.
+- **`wt focus-tab` against a COLD managed window**, and whether the `SetForegroundWindow` nudge truly
+  raises the window versus only flashing the taskbar icon while the app is in the background. Both
+  are best effort by design; everything else in the launch/focus/reattach path is now confirmed by
+  hand (see below).
+
+Confirmed live by hand on 2026-07-30, from an installed MSI:
+- `launchSession()` opens EXACTLY ONE tab in the managed `cmc` window (title = the name,
+  `claude.exe --name "<name>"` running as the hosted PowerShell's child, no junk tabs, no
+  0x80070002), and a named launch reaches the board as `session.title`.
+- `reopenSession()` really reattaches: `claude.exe --resume <id>` in a fresh tab, that tab active
+  afterwards. Take Control was used to reopen this very session.
+- The per-session GitHub account pinning survives the `-EncodedCommand` change (a `2-ZRM` launch
+  reported `przrm` inside the tab).
+- Note Claude Code REPLACES our `--title` with the resumed session's own name once it loads, so
+  `bringToForeground()`'s title match can miss on a reattach whose stored title differs from the
+  session's real name. It is best effort and `wt focus-tab` has already switched tabs by then.
+
+Landed 2026-07-30 (PRs #17, #19, #21, #24; releases `fleet-v0.1.9` through `fleet-v0.1.12`):
+- **Launching worked at all again** (#16/#17): the `wt` semicolon trap above. Every launch had been
+  producing four junk error tabs and never starting Claude since the per-session account feature
+  landed.
+- **The in-app updater could open its own MSI** (#18/#19): Node's `\"` escaping surviving into
+  cmd.exe, plus the no-leading-quote rule. See the desktop section.
+- **0.1.10 shipped dead and taught us the packaging guard** (#20/#21): a new `desktop/` module was
+  imported but not in electron-builder's `files` allowlist. `scripts/check-desktop-package.mjs` now
+  fails on exactly that.
+- **`/rename` reaches the board** (#23) and **shortcuts plus the Settings popup** (#22), both in
+  `fleet-v0.1.12`. See their own sections.
 
 Landed 2026-07-19 (PRs #3, #4, #6, #8):
 - **Demo mode.** `public/demo.js` (zero-dep) drives the whole UI through a looping scripted fake
@@ -271,6 +289,13 @@ Design record: `https://claude.ai/code/artifact/d611c0ef-2208-4da3-90fb-4334b3d4
 - **Severity ramp** (`.lo`/`.mid`/`.hi` setting `--sev`) is shared by the card's context ring and the
   top-bar quota rings: under 60 accent blue, 60 to 85 amber, 85 and over `--error`. Semantic colour,
   deliberately separate from the accent.
+- **The header's icon buttons are a GROUP** (`.hdr-actions`, which owns the `margin-left: auto`),
+  never individually right-pushed. `margin-left: auto` used to sit on `.icon-btn` itself, which was
+  invisible while there was one button and broke the moment there were two: each button's `auto`
+  absorbed free space, so the leftover width landed BETWEEN them as a large visible gap (fixed
+  2026-07-30, issue #25). A new header icon button joins the container; it must not carry its own
+  `margin-left: auto`. `scripts/render-check.mjs` asserts the pair's real geometry (adjacent, one
+  row, parked at the right edge).
 - **New session is a green button in `.nav`** next to Sessions, opening a modal (`#newSessionBackdrop`
   holds the visibility, the panel inside does not) with the cascading repo picker, Name and Launch.
   Esc and backdrop close it, focus goes to the Name field on open and back to the opener on close.
