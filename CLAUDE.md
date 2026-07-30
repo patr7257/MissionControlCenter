@@ -137,6 +137,11 @@ common case.
 restart does not desync `tabIndex` from the real tab positions in a still-open managed window.
 
 Still pending (not code-complete):
+- **Packaged desktop installs cannot feed the statusline yet.** The quota meters and the
+  context-window rings stay blank in an MSI install until a `statusline-feed.mjs.cmd`
+  Electron-as-node wrapper exists in `desktop/assets/`, mirroring `send-event.mjs.cmd`, and
+  `desktop/main.mjs` sets `CMC_STATUSLINE_COMMAND` to it the way it already sets
+  `CMC_HOOK_COMMAND`. Running the repo copy (`node start.mjs`) is unaffected and does feed it.
 - **Live focus/reattach validation on the real machine.** Launching is confirmed by hand
   (2026-07-30): a real tab opened in the managed `cmc` window, hosted by
   `powershell.exe -NoExit -Command "claude --name '<name>'"` with `claude.exe --name "<name>"`

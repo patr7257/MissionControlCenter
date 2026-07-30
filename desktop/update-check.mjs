@@ -1,7 +1,12 @@
 // Lightweight "is there a newer release?" check for the desktop app.
-// The repo is private, so instead of baking a token into the app this shells
-// out to the locally authenticated gh CLI. Any failure (no gh, offline, not
-// authed, bad JSON) resolves to "no update" silently.
+// Shells out to the locally authenticated gh CLI rather than baking a token
+// into the app. (The repo is PUBLIC as of 2026-07-30, so the listing would work
+// unauthenticated too; gh is kept because `gh release download` in the install
+// path uses it anyway, and it keeps both paths on one mechanism.) Any failure
+// (no gh, offline, not authed, bad JSON) resolves to "no update" silently.
+// Verified 2026-07-30 that the listing succeeds under either of the two GitHub
+// accounts configured on this machine, so the per-account GH_CONFIG_DIR split
+// does not affect update checks.
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
