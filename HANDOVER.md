@@ -109,9 +109,9 @@ Real-browser render check (skips cleanly if no Chromium):
 ```
 cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node scripts\render-check.mjs
 ```
-Same, plus a screenshot on the Desktop:
+Same, plus a screenshot on the Desktop (note the OneDrive path, see gotchas):
 ```
-cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node scripts\render-check.mjs --shot "$env:USERPROFILE\Desktop\mcc-board.png"
+cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node scripts\render-check.mjs --shot "$env:USERPROFILE\OneDrive\Desktop\mcc-board.png"
 ```
 Check the lock file agrees with what is listening (the hook-delivery failure mode):
 ```
@@ -144,6 +144,10 @@ cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; git tag fleet-v0.2.0; gi
   Three letters at 16px is a smudge that also eats a third of the artwork.
 - **There is no ImageMagick on this machine.** `C:\Windows\System32\convert.exe` is the filesystem
   converter. Most icon tutorials and skills online assume ImageMagick and will fail here.
+- **The Desktop is OneDrive-redirected.** The visible desktop is
+  `C:\Users\pr\OneDrive\Desktop`; the legacy `C:\Users\pr\Desktop` still exists but Explorer does
+  NOT show it. Writing a file "to the Desktop" via `$env:USERPROFILE\Desktop` puts it somewhere
+  invisible, which happened this session. Always use the OneDrive path when handing Patrick a file.
 - **NEVER run `gh auth switch`.** Accounts are pinned by directory (`includeIf` for `2-ZRM`) and per
   session (`GH_CONFIG_DIR`). Switching hijacks other running sessions.
 - **`credential.helper` is MULTI-valued and accumulates.** An empty `helper =` line resets the list,
@@ -176,6 +180,7 @@ cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; git tag fleet-v0.2.0; gi
 - No Docker, no cron or scheduled jobs, no stray Playwright Chromium.
 - Both `MissionControlCenter` and `PatrickRobelWeb` are on `main`, clean, single worktree, no
   gone-upstream branches, no open PRs.
-- Icon previews left on the Desktop on purpose: `MCC-icon-preview.png`,
-  `StreamingHub-icon-preview.png`, `MCC-icon.ico`. Delete when done with them.
+- Icon previews left on the REAL Desktop on purpose:
+  `C:\Users\pr\OneDrive\Desktop\MCC-icon-preview.png`, `StreamingHub-icon-preview.png`,
+  `MCC-icon.ico`. Delete when done with them.
 - Test artifacts went to the session scratchpad and OS temp only; nothing landed in either repo.
