@@ -191,13 +191,17 @@ cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; git tag fleet-v0.2.0; gi
 - PatrickRobelWeb's `HANDOVER.md` is still stale (claims PR #160 awaits merge, no open PRs there).
 
 ## Environment state
-- **The installed app is running on purpose** (0.1.12, serving `http://localhost:4317`), since it is
-  what this session is being driven from. Its hooks are registered.
+- **Everything was stopped at session close.** `node stop.mjs` removed 9 hook groups and restored the
+  original statusLine (the `statusline-command.py` one, verified by reading it back), the app was closed,
+  port 4317 is free, the lock file is gone, and zero `server.mjs` processes remain. Hooks are NOT
+  registered while the app is closed, so the board receives no live events until you launch it again
+  (launching re-adds them).
 - `main` is clean and up to date, ONE worktree (the primary checkout). All four session worktrees
   (`-16`, `-18`, `-20`, `-22`, `-23`) removed, every branch deleted local and remote, no
   gone-upstream branches, no open PRs, board all Done.
 - Keep-awake NOT active; power defaults intact (lid close = sleep on AC and DC).
 - No Docker (daemon not running), no cron or scheduled jobs created this session, no stray Chromium.
 - Screenshots and probe scripts went to the session scratchpad only; nothing landed in the repo.
-- `C:\Users\pr\Downloads` holds the 0.1.11 and 0.1.12 MSIs (111 MB each) plus older ones, left there
-  deliberately so the manual install line stayed valid. Safe to delete.
+- `Downloads` was swept of every Mission Control MSI (779 MB freed), then
+  `Mission.Control.Center.0.1.13.msi` was re-downloaded so a manual install line stayed valid.
+  Delete it whenever you like; 0.1.13 is installed.
