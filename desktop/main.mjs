@@ -108,21 +108,89 @@ async function waitForServer(timeoutMs) {
 // `quitting` so the SSE notification loop stops retrying during shutdown. Always
 // quits even if stop.mjs fails, so the app never hangs on close.
 let tearingDown = false;
+
+// The teardown itself, awaitable, WITHOUT quitting. The update path needs to
+// know the detached server is really gone before it hands over to msiexec, and
+// a fire-and-forget callback cannot express that.
+function runTeardown() {
+  return new Promise((resolve) => {
+    quitting = true;
+    let settled = false;
+    const done = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    try {
+      const child = runAsNode(path.join(BACKEND, 'stop.mjs'));
+      child.on('close', done);
+      child.on('error', done);
+    } catch {
+      done();
+    }
+    // Never hang the app on a wedged stop.mjs.
+    setTimeout(done, 8000);
+  });
+}
+
+// Polls until nothing is serving the dashboard port any more, so we know the
+// detached backend process has actually exited rather than merely been asked to.
+async function waitForServerGone(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  // Remember the port while the lock still exists: once it is removed we would
+  // otherwise lose track of which port to prove is silent.
+  const startLock = runningLock();
+  const port = (startLock && startLock.port) || DEFAULT_PORT;
+  while (Date.now() < deadline) {
+    if (!runningLock()) {
+      try {
+        await fetch(`http://127.0.0.1:${port}`, { signal: AbortSignal.timeout(600) });
+        // Something still answers on that port, so keep waiting.
+      } catch {
+        return true; // no live lock and nothing listening: the backend is gone
+      }
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return false;
+}
+
 function stopServerAndRemoveHooks() {
   if (tearingDown) return;
   tearingDown = true;
-  quitting = true;
-  const child = runAsNode(path.join(BACKEND, 'stop.mjs'));
-  child.on('close', () => app.quit());
-  child.on('error', () => app.quit());
+  runTeardown().then(() => app.quit());
 }
 
-// Launch the downloaded MSI and quit so the in-place upgrade is not blocked by
-// this app's locked files. msiexec /i shows the (oneClick:false) installer UI;
-// electron-builder's runAfterFinish relaunches the app when it finishes.
+// Hands the MSI to a detached helper that waits a few seconds BEFORE starting
+// msiexec, so this app (and the backend process it spawned) are fully gone by
+// the time the installer inventories locked files.
+//
+// This is why the delay exists: msiexec was previously started while the app was
+// still alive, and its "Files in Use" page then listed Mission Control Center.
+// Choosing "close the applications" there does not reliably help, because the
+// detached backend runs from the same installed binary and can survive. A
+// surviving backend keeps holding the port, and because server.mjs reads
+// public/** from disk per request, the upgraded window then loads the NEW UI
+// while the OLD backend code answers its API calls. That is exactly how a
+// 0.1.6 window ended up served by a pre-0.1.5 backend with no `accounts` in
+// GET /repos (2026-07-30).
+//
+// The detached `cmd` outlives us, so it can wait and only then start msiexec,
+// by which point this app and its backend are gone. Notes on the exact form:
+//   - `ping` is the dependency-free delay; `timeout` needs a console and fails
+//     in a detached process.
+//   - No `start` wrapper. msiexec is on PATH (C:\Windows\System32\msiexec.exe),
+//     and cmd passes the quoted path through as one argument even with spaces.
+//   - No `>nul`. stdio:'ignore' already discards everything, and the redirect
+//     was observed emitting "The system cannot find the path specified."
 function launchInstaller(msiPath) {
   try {
-    spawn('msiexec', ['/i', msiPath], { detached: true, stdio: 'ignore' }).unref();
+    spawn('cmd', ['/c', `ping -n 6 127.0.0.1 & msiexec /i "${msiPath}"`], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    }).unref();
     return true;
   } catch {
     return false;
@@ -134,7 +202,10 @@ function launchInstaller(msiPath) {
 // stuck after they opted in.
 async function downloadAndInstall(tag) {
   const msi = await downloadReleaseMsi(tag);
-  if (!msi || !launchInstaller(msi)) {
+
+  // Download failure: nothing has been torn down yet, so the app stays fully
+  // usable and we just offer the manual page.
+  if (!msi) {
     const { response } = await dialog.showMessageBox(mainWin, {
       type: 'error',
       message: 'Could not download the update automatically.',
@@ -146,6 +217,32 @@ async function downloadAndInstall(tag) {
     if (response === 0) shell.openExternal(RELEASES_URL);
     return false;
   }
+
+  // Shut the backend down and WAIT for it before the installer is scheduled.
+  // Order matters: tear down, confirm it is gone, only then hand over to
+  // msiexec. Doing it the other way round is what produced the "Files in Use"
+  // dialog and left an old backend serving the new UI.
+  tearingDown = true;
+  await runTeardown();
+  await waitForServerGone(10000);
+
+  if (!launchInstaller(msi)) {
+    // We have already stopped the backend and removed the hooks, so the window
+    // behind this dialog is a shell with nothing serving it. Quitting is the
+    // honest outcome; pretending the app still works would be worse.
+    await dialog.showMessageBox(mainWin, {
+      type: 'error',
+      message: 'Could not start the installer.',
+      detail:
+        'Mission Control Center has already shut its backend down to make way for the upgrade, so it will close now. The MSI was downloaded to:\n\n' +
+        msi +
+        '\n\nRun it by hand to finish updating.',
+      buttons: ['Close'],
+    });
+    app.quit();
+    return false;
+  }
+
   app.quit();
   return true;
 }

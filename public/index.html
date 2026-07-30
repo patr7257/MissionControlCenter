@@ -14,6 +14,9 @@
     <button class="attention" id="attention" type="button" style="display:none" title="Switch to Needs input and jump to the sessions waiting for you">
       <span class="att-dot"></span><span id="attCount">0</span> need input
     </button>
+    <button class="attention done-attention" id="doneAwaiting" type="button" style="display:none" title="Switch to Done - awaiting user and jump to those sessions">
+      <span class="att-dot"></span><span id="doneCount">0</span> Done - awaiting user
+    </button>
     <div class="nav" id="nav">
       <button data-view="sessions" class="navbtn on" id="navSessions">Sessions</button>
       <button class="gobtn" id="newSessionOpenBtn" type="button">New session</button>
@@ -23,13 +26,26 @@
       <span class="crumb-session" id="crumbSession"></span>
     </div>
     <div class="m5" id="usageMeters"></div>
-    <div class="stats">
-      <div class="stat"><div class="n" id="sActive">0</div><div class="l" id="sActiveL">working</div></div>
-      <div class="stat"><div class="n" id="sDone">0</div><div class="l" id="sDoneL">done</div></div>
-      <div class="stat"><div class="n" id="sSteps">0</div><div class="l" id="sStepsL">steps</div></div>
-      <div class="stat"><div class="n" id="sClock">0:00</div><div class="l" id="sClockL">elapsed</div></div>
-    </div>
+    <button class="icon-btn" id="statsBtn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="statsPopup" title="Show session stats">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M4 19V11"></path><path d="M12 19V5"></path><path d="M20 19V14"></path>
+      </svg>
+    </button>
   </header>
+
+  <div class="pop-backdrop" id="statsBackdrop" style="display:none">
+    <div class="pop stats-pop" id="statsPopup" role="dialog" aria-modal="true" aria-labelledby="statsPopupTitle">
+      <div class="pop-head"><b id="statsPopupTitle">Stats</b><span>esc to close</span></div>
+      <div class="pop-body">
+        <div class="stats">
+          <div class="stat"><div class="n" id="sActive">0</div><div class="l" id="sActiveL">working</div></div>
+          <div class="stat"><div class="n" id="sDone">0</div><div class="l" id="sDoneL">done</div></div>
+          <div class="stat"><div class="n" id="sSteps">0</div><div class="l" id="sStepsL">steps</div></div>
+          <div class="stat"><div class="n" id="sClock">0:00</div><div class="l" id="sClockL">elapsed</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div class="pop-backdrop" id="newSessionBackdrop" style="display:none">
     <div class="pop" id="newSessionPopup" role="dialog" aria-modal="true" aria-labelledby="newSessionPopupTitle">
@@ -63,9 +79,14 @@
       <select id="fltState" class="flt-select">
         <option value="all">All</option>
         <option value="active" selected>Active</option>
-        <option value="needs-input">Needs input</option>
         <option value="closed">Closed</option>
       </select>
+      <div class="seg" id="segState" role="tablist" aria-label="Active sessions">
+        <span class="seg-thumb" aria-hidden="true"></span>
+        <button type="button" class="seg-tab" id="segAll" role="tab" data-segment="all" aria-selected="true">All active <span class="seg-count" id="segAllCount">0</span></button>
+        <button type="button" class="seg-tab" id="segNeeds" role="tab" data-segment="needs-input" aria-selected="false" tabindex="-1">Needs input <span class="seg-count" id="segNeedsCount">0</span></button>
+        <button type="button" class="seg-tab" id="segDone" role="tab" data-segment="done" aria-selected="false" tabindex="-1">Done - awaiting user <span class="seg-count" id="segDoneCount">0</span></button>
+      </div>
       <select id="fltTime" class="flt-select">
         <option value="all">All time</option>
         <option value="today" selected>Today</option>
@@ -128,15 +149,51 @@
 
       document.getElementById('navSessions').addEventListener('click', function () { Store.clearSession(); });
       document.getElementById('crumbBack').addEventListener('click', function () { Store.clearSession(); });
-      // Attention pill: it is now a filter control. Jump back to the board,
-      // switch Show to "Needs input" so the blocked sessions are the only
-      // thing on screen, and scroll to the top.
+      // Attention pill: it is a filter control. Jump back to the board, switch
+      // Show to Active with the Needs input segment so the blocked sessions
+      // are the only thing on screen, and scroll to the top.
       document.getElementById('attention').addEventListener('click', function () {
         Store.clearSession();
-        ViewSessions.setStateFilter('needs-input');
+        ViewSessions.setStateFilter('active', 'needs-input');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+      // Done-awaiting label: same idea, but for sessions that merely finished
+      // (Stop hook) and need nothing from the user.
+      document.getElementById('doneAwaiting').addEventListener('click', function () {
+        Store.clearSession();
+        ViewSessions.setStateFilter('active', 'done');
         window.scrollTo({ top: 0, behavior: 'smooth' });
       });
       document.getElementById('newSessionOpenBtn').addEventListener('click', function () { ViewSessions.openNewSession(); });
+
+      // ---- Stats dashboard popup: the 4 header tiles (sessions/board or
+      // working/done/steps/elapsed detail, see Store.setStats) moved off the
+      // always-visible header strip into a popup, reusing the same .pop*
+      // chrome language as the New session popup. Esc closes, click outside
+      // closes, focus returns to the opener button on close. ----
+      function openStatsPopup() {
+        var bd = document.getElementById('statsBackdrop');
+        if (!bd) return;
+        bd.style.display = 'flex';
+        document.getElementById('statsBtn').setAttribute('aria-expanded', 'true');
+        document.addEventListener('keydown', onStatsKeydown);
+      }
+      function closeStatsPopup() {
+        var bd = document.getElementById('statsBackdrop');
+        if (bd) bd.style.display = 'none';
+        document.removeEventListener('keydown', onStatsKeydown);
+        var btn = document.getElementById('statsBtn');
+        if (btn) { btn.setAttribute('aria-expanded', 'false'); btn.focus(); }
+      }
+      function onStatsKeydown(e) { if (e.key === 'Escape') closeStatsPopup(); }
+      document.getElementById('statsBtn').addEventListener('click', function () {
+        var bd = document.getElementById('statsBackdrop');
+        var isOpen = !!bd && bd.style.display !== 'none';
+        if (isOpen) closeStatsPopup(); else openStatsPopup();
+      });
+      document.getElementById('statsBackdrop').addEventListener('click', function (e) {
+        if (e.target === document.getElementById('statsBackdrop')) closeStatsPopup();
+      });
 
       Store.setActive('sessions');
       updateCrumb();

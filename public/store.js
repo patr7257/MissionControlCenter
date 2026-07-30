@@ -36,26 +36,38 @@
     usageFns.push(fn);
     fn(usage);
   }
-  // Shared definition of "blocked on the user" (needs-permission / awaiting),
-  // used by the header attention pill count AND the Needs input board filter,
-  // so the two never drift apart.
-  function needsInput(s) { return !!s && (s.status === 'needs-permission' || s.status === 'awaiting'); }
+  // Shared status predicates. `needsPermission` (the `Notification`/permission
+  // prompt hook) is the ONLY status where Claude is genuinely blocked on the
+  // user, so it is the sole meaning of "needs input". `awaiting` is set by the
+  // `Stop` hook: Claude finished its turn and has nothing left to do, which is
+  // informational, not a block. These two definitions are the single shared
+  // source of truth (header pills, favicon/title alerting, the board's Active
+  // segmented sub-filter, the stat tiles); nothing else may re-derive them.
+  function needsInput(s) { return !!s && s.status === 'needs-permission'; }
+  function doneAwaiting(s) { return !!s && s.status === 'awaiting'; }
 
-  // ---- Attention: surface sessions blocked on the user (needs-permission /
-  // awaiting) even when the window is not focused, via a header pill, the
-  // document title, and the favicon. ----
+  // ---- Attention: surface sessions genuinely blocked on the user
+  // (needs-permission only) even when the window is not focused, via a header
+  // pill, the document title, and the favicon. A second, calmer header label
+  // separately surfaces "done, awaiting user" (informational, never alerts). ----
   var BASE_TITLE = 'Mission Control Center';
   var FAVICON_OK = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='9' fill='%235b9cff'/%3E%3C/svg%3E";
   var FAVICON_ALERT = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='12' fill='%23ffb43d'/%3E%3Ccircle cx='16' cy='16' r='4.5' fill='%23241a00'/%3E%3C/svg%3E";
   var attnCount = 0;
   function updateAttention() {
-    var n = 0;
-    sessions.forEach(function (s) { if (needsInput(s)) n += 1; });
+    var n = 0, d = 0;
+    sessions.forEach(function (s) { if (needsInput(s)) n += 1; if (doneAwaiting(s)) d += 1; });
     attnCount = n;
     var pill = document.getElementById('attention');
     if (pill) {
       pill.style.display = n > 0 ? '' : 'none';
       var c = document.getElementById('attCount'); if (c) c.textContent = n;
+    }
+    // Informational only: never drives the favicon/title alert below.
+    var donePill = document.getElementById('doneAwaiting');
+    if (donePill) {
+      donePill.style.display = d > 0 ? '' : 'none';
+      var dc = document.getElementById('doneCount'); if (dc) dc.textContent = d;
     }
     var fav = document.getElementById('favicon');
     if (fav) fav.setAttribute('href', n > 0 ? FAVICON_ALERT : FAVICON_OK);
@@ -240,7 +252,7 @@
     snapshot: snapshot, onTick: onTick, connect: connect, ingest: handleMessage,
     visibleAgents: visibleAgents, visibleAgentIds: visibleAgentIds,
     selectSession: selectSession, clearSession: clearSession,
-    onUsage: onUsage, needsInput: needsInput, setStats: setStats,
+    onUsage: onUsage, needsInput: needsInput, doneAwaiting: doneAwaiting, setStats: setStats,
     fmt: { dur: fmtDur, tokens: fmtTokens, esc: esc, shortId: shortId, hash: hashStr, model: fmtModel }
   };
 })();

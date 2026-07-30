@@ -7,8 +7,11 @@
   var cards = new Map(); // session id -> refs
 
   var STATUS_RANK = { 'needs-permission': 0, working: 1, awaiting: 2, recent: 3, ended: 4 };
+  // "awaiting" (the Stop hook: Claude finished its turn, nothing required)
+  // reads as "Done - awaiting user", never "Awaiting input" - it is not
+  // asking for anything. Only needs-permission is a real block on the user.
   var STATUS_LABEL = {
-    working: 'Working', awaiting: 'Awaiting input', 'needs-permission': 'Needs permission',
+    working: 'Working', awaiting: 'Done - awaiting user', 'needs-permission': 'Needs permission',
     recent: 'Recent', ended: 'Ended'
   };
 
@@ -16,7 +19,10 @@
   // The board always opens scoped to today's active sessions, which is what the
   // "what is running right now" question needs. Narrowing or widening it during a
   // session works, it just does not carry over to the next app open.
-  var filters = { state: 'active', time: 'today', repo: '' };
+  // `segment` refines the Active state only: 'all' (every active session),
+  // 'needs-input' (blocked on the user, needs-permission) or 'done' (finished,
+  // awaiting the user, informational). Meaningless for All/Closed.
+  var filters = { state: 'active', time: 'today', repo: '', segment: 'all' };
 
   // Active = connected right now, or in a state that is waiting on the user.
   // Everything else (ended, or an old backfilled "recent" that is not live) is
@@ -33,21 +39,23 @@
     if (!ts) return false;
     return (Date.now() - ts) <= days * 24 * 60 * 60 * 1000;
   }
-  // Whether ANY tracked session (regardless of the other filters) needs input
-  // right now, used to self-heal the Needs input filter back to Active.
-  function anyNeedsInput() {
-    var any = false;
-    Store.sessions.forEach(function (s) { if (Store.needsInput(s)) any = true; });
-    return any;
-  }
-  function passesFilters(s) {
-    if (filters.state === 'active' && !isActiveSession(s)) return false;
-    if (filters.state === 'closed' && isActiveSession(s)) return false;
-    if (filters.state === 'needs-input' && !Store.needsInput(s)) return false;
+  // Shared by passesFilters and the segmented control's live counts, so a
+  // segment's count always matches what selecting it would actually show.
+  function matchesTimeRepo(s) {
     if (filters.time === 'today' && !isToday(s.lastActivityAt)) return false;
     if (filters.time === 'week' && !isWithinDays(s.lastActivityAt, 7)) return false;
     if (filters.repo && (s.project || '') !== filters.repo) return false;
     return true;
+  }
+  function passesFilters(s) {
+    if (filters.state === 'active') {
+      if (!isActiveSession(s)) return false;
+      if (filters.segment === 'needs-input' && !Store.needsInput(s)) return false;
+      if (filters.segment === 'done' && !Store.doneAwaiting(s)) return false;
+    } else if (filters.state === 'closed') {
+      if (isActiveSession(s)) return false;
+    }
+    return matchesTimeRepo(s);
   }
 
   // Rebuild the repo dropdown from the distinct projects currently tracked,
@@ -78,16 +86,107 @@
     st.addEventListener('change', function () { filters.state = st.value; syncAll(); });
     tm.addEventListener('change', function () { filters.time = tm.value; syncAll(); });
     rp.addEventListener('change', function () { filters.repo = rp.value; syncAll(); });
+    initSegmentedControl();
   }
 
-  // Switch the Show filter (used by the attention pill: "N need input" jumps
-  // straight to the Needs input filter) and keep the visible <select> in sync,
-  // not just the internal filters object.
-  function setStateFilter(value) {
+  // Switch the Show filter (used by the attention pill and the done-awaiting
+  // label: each jumps straight to Active plus a specific segment) and keep
+  // the visible <select> in sync, not just the internal filters object. A
+  // segment argument is optional so plain state switches (none currently, but
+  // kept general) do not have to touch the segment choice.
+  function setStateFilter(value, segment) {
     filters.state = value;
     var st = document.getElementById('fltState');
     if (st) st.value = value;
+    if (segment) filters.segment = segment;
     syncAll();
+  }
+
+  // ---- Segmented "Active" sub-filter: All active / Needs input / Done -
+  // awaiting user. A real slider (a thumb measured and positioned in JS,
+  // since the three segments have very different natural widths) rather than
+  // three buttons that merely recolour. Roving tabindex + arrow-key movement
+  // (role="tablist"/"tab", aria-selected) for keyboard access. ----
+  var SEGMENTS = ['all', 'needs-input', 'done'];
+  function segEls() {
+    var wrap = document.getElementById('segState');
+    if (!wrap) return null;
+    return {
+      wrap: wrap,
+      thumb: wrap.querySelector('.seg-thumb'),
+      tabs: Array.prototype.slice.call(wrap.querySelectorAll('.seg-tab'))
+    };
+  }
+  function setSegment(seg) {
+    if (SEGMENTS.indexOf(seg) === -1) seg = 'all';
+    filters.segment = seg;
+    syncAll();
+  }
+  function positionSegThumb(e) {
+    if (!e || !e.thumb) return;
+    var active = e.tabs.filter(function (t) { return t.getAttribute('aria-selected') === 'true'; })[0];
+    if (!active) return;
+    e.thumb.style.width = active.offsetWidth + 'px';
+    e.thumb.style.transform = 'translateX(' + active.offsetLeft + 'px)';
+  }
+  function setSegCount(id, n) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (el.textContent !== String(n)) el.textContent = n;
+    el.classList.toggle('zero', n === 0);
+  }
+  // Counts reflect what selecting that segment would actually list: every
+  // active session matching the current time/repo filters, partitioned by
+  // needsInput/doneAwaiting. Kept in sync with passesFilters via
+  // matchesTimeRepo so a segment's number never lies about its own list.
+  function updateSegmentCounts() {
+    var total = 0, needs = 0, done = 0;
+    Store.sessions.forEach(function (s) {
+      if (!isActiveSession(s) || !matchesTimeRepo(s)) return;
+      total += 1;
+      if (Store.needsInput(s)) needs += 1;
+      if (Store.doneAwaiting(s)) done += 1;
+    });
+    setSegCount('segAllCount', total);
+    setSegCount('segNeedsCount', needs);
+    setSegCount('segDoneCount', done);
+  }
+  // Refreshes counts, visibility (shown only while Show=Active) and the
+  // selected/thumb state together, since the thumb's position depends on the
+  // just-updated count text changing each tab's rendered width.
+  function refreshSegmentedControl() {
+    var e = segEls();
+    if (!e) return;
+    updateSegmentCounts();
+    var show = filters.state === 'active';
+    e.wrap.style.display = show ? '' : 'none';
+    e.tabs.forEach(function (tab) {
+      var isSel = tab.getAttribute('data-segment') === filters.segment;
+      tab.setAttribute('aria-selected', isSel ? 'true' : 'false');
+      tab.tabIndex = isSel ? 0 : -1;
+    });
+    if (show) positionSegThumb(e);
+  }
+  function initSegmentedControl() {
+    var e = segEls();
+    if (!e || e.wrap._wired) return;
+    e.wrap._wired = true;
+    e.tabs.forEach(function (tab, idx) {
+      tab.addEventListener('click', function () { setSegment(tab.getAttribute('data-segment')); tab.focus(); });
+      tab.addEventListener('keydown', function (ev) {
+        var target = null;
+        if (ev.key === 'ArrowRight' || ev.key === 'ArrowDown') target = (idx + 1) % e.tabs.length;
+        else if (ev.key === 'ArrowLeft' || ev.key === 'ArrowUp') target = (idx - 1 + e.tabs.length) % e.tabs.length;
+        else if (ev.key === 'Home') target = 0;
+        else if (ev.key === 'End') target = e.tabs.length - 1;
+        else return;
+        ev.preventDefault();
+        var next = e.tabs[target];
+        setSegment(next.getAttribute('data-segment'));
+        next.focus();
+      });
+    });
+    window.addEventListener('resize', function () { if (filters.state === 'active') positionSegThumb(segEls()); });
   }
 
   function fmtRelative(ts) {
@@ -357,14 +456,6 @@
   function syncAll() {
     var wrap = document.getElementById('sessionsWrap');
     if (!wrap) return;
-    // Self-heal: the Needs input filter never sits on an empty board. The
-    // moment nothing needs input, fall back to Active automatically. This
-    // never fires for any OTHER manually chosen filter value.
-    if (filters.state === 'needs-input' && !anyNeedsInput()) {
-      filters.state = 'active';
-      var st = document.getElementById('fltState');
-      if (st) st.value = 'active';
-    }
     var list = sortedSessions();
     var seen = new Set();
     list.forEach(function (s) {
@@ -390,6 +481,7 @@
       }
     }
     updateStatTiles();
+    refreshSegmentedControl();
   }
 
   // Cascading New session picker, now hosted inside a popup dialog instead of
@@ -448,6 +540,21 @@
     if (!sel) return;
     var prev = sel.value;
     sel.innerHTML = '';
+    if (!accounts.length) {
+      // No account list from the server: an old backend answering behind a
+      // newer frontend (the exact bug hit on 2026-07-30 - an installed app's
+      // updater left the old backend running while the new UI shipped, so
+      // GET /repos came back with no accounts field at all), or genuinely no
+      // accounts configured. A blank, focused select with zero options gives
+      // the user nothing to act on and looks broken; a disabled placeholder
+      // at least says what happened, matching the folder picker's own
+      // "No repos found" / "Failed to load repos" pattern so the two read as
+      // one system.
+      var none = oneOption('', 'No accounts available');
+      none.disabled = true;
+      sel.appendChild(none);
+      return;
+    }
     accounts.forEach(function (a) {
       var o = document.createElement('option'); o.value = a.key; o.textContent = a.label; sel.appendChild(o);
     });
@@ -574,12 +681,19 @@
     var name = nameEl ? String(nameEl.value || '').trim() : '';
     var label = name || repoName;
     var accountKey = accSel ? accSel.value : '';
+    // When there is no real account selected (the "No accounts available"
+    // placeholder, or no picker at all), omit the `account` key entirely
+    // rather than sending an empty string, so the server's own default
+    // resolution (terminal.mjs defaultAccountForPath) decides. A missing
+    // account list must never block launching.
+    var body = { repo: repoPath, title: label, name: name };
+    if (accountKey) body.account = accountKey;
     btn.disabled = true;
     if (feedback) feedback.textContent = 'Launching ' + label + '...';
     fetch('/launch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: repoPath, title: label, name: name, account: accountKey })
+      body: JSON.stringify(body)
     }).then(function (res) { return res.json(); }).then(function (data) {
       var failed = data && data.ok === false;
       if (feedback) {
