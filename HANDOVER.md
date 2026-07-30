@@ -6,17 +6,23 @@
 - PRs this session: #13 (`d8ddb43`), #14 (`56758d2`), #15 (`c8b9d3a`), all squashed and merged,
   all branches deleted. No open PRs.
 - CI green on all three.
-- **Releases are automatic on merge to `main` and PROVEN in both directions**: a code merge
-  published `fleet-v0.1.6` then `fleet-v0.1.7` with no manual step, and a docs-only merge correctly
-  reported `msi: skipped` without minting a version.
-- **Install `fleet-v0.1.7`**:
-  `https://github.com/patr7257/MissionControlCenter/releases/tag/fleet-v0.1.7`
+- **Releases are automatic on merge to `main` and PROVEN in both directions**: code merges published
+  `fleet-v0.1.6`, `0.1.7` and `0.1.8` with no manual step, and a docs-only merge correctly reported
+  `msi: skipped` without minting a version.
+- **Install `fleet-v0.1.8`** (latest):
+  `https://github.com/patr7257/MissionControlCenter/releases/tag/fleet-v0.1.8`
+  0.1.8 is functionally identical to 0.1.7. It exists because a commit labelled `docs:` also added
+  `desktop/build/icon-source.png`, and a PNG is not in the skip list, so the workflow correctly did
+  NOT skip. The lesson is about commit hygiene, not the workflow: if a release is unwanted, the
+  commit must touch ONLY `*.md`, `docs/`, `.claude/` or `.github/`.
 
 ## READ THIS FIRST: the updater fix is not yet proven in the wild
-Going from 0.1.6 to 0.1.7 runs the **0.1.6 installer logic**, which is the buggy one, so expect the
-"Files in Use" dialog ONE more time on that upgrade. The fix only takes effect for updates started
-from 0.1.7 onward. The first genuine test is 0.1.7 to 0.1.8. If that upgrade is clean and the app
-comes back with a populated GitHub account dropdown, the fix is confirmed.
+Upgrading an installed 0.1.6 runs the **0.1.6 installer logic**, which is the buggy one, so expect
+the "Files in Use" dialog ONE more time on the next upgrade regardless of which version you go to.
+The fix only takes effect for upgrades STARTED from a build that contains it (0.1.7 and later). So:
+install 0.1.8 now and expect one last prompt, then the following upgrade from 0.1.8 is the genuine
+test. If that one is clean and the app comes back with a populated GitHub account dropdown, the fix
+is confirmed.
 
 Also: `node stop.mjs` was run at session close, which removed the hook groups. **Relaunch the
 installed app once** so it re-registers its hooks, otherwise the board receives no live events.
@@ -70,9 +76,9 @@ Not started (carried over):
 - Demo confetti beat (the demo loop ends on an error, so all-done confetti never fires).
 
 ## Prioritized next steps
-1. Relaunch the installed app so hooks re-register, then install `fleet-v0.1.7` (expect one last
+1. Relaunch the installed app so hooks re-register, then install `fleet-v0.1.8` (expect one last
    "Files in Use" prompt, see the warning above).
-2. Confirm the updater fix on the NEXT release (0.1.7 to 0.1.8): clean upgrade, no Files-in-Use, and
+2. Confirm the updater fix on the upgrade AFTER 0.1.8: clean upgrade, no Files-in-Use, and
    a populated GitHub account dropdown afterwards. This is the only unverified part of the pipeline.
 3. Watch the new labels with real states: let a session finish (`Done - awaiting user`) and trigger a
    permission prompt (`Needs input`), and confirm the pill counts and segments agree.
