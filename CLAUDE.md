@@ -385,6 +385,17 @@ caps at 60 chars) and then used twice: as the Windows Terminal tab title, and as
 Mission Control has no rename-after-the-fact affordance on purpose (there is no way to push a name
 into a live session without keystroke injection).
 
+**A `/rename` DOES reach the board, and `session.title` is not write-once** (fixed 2026-07-30,
+issue #23). Two sources report a session's CURRENT name and therefore see a rename immediately: the
+registry's `name` and the statusline payload's `session_name`. Both go through `applyLiveName()`,
+which adopts a CHANGED name and ignores an empty or unchanged one, so a registry file carrying no
+name cannot blank a title. `applyLaunchName()` stays deliberately fill-only: it is the one-time
+`terminal.bindSession()` hint joining a `claude --name` launch to its session id, and it must never
+overwrite what the session itself reports. Before the fix every writer was guarded on
+`!session.title`, so the FIRST name a session ever had won forever: a session that Claude Code
+auto-named `missioncontrolcenter-62` at startup kept that label through two renames while the
+terminal tab and the prompt box both showed the new one.
+
 The name reaches the board through the existing deferred join: `/launch` has no session id yet, so
 the sanitized name is stored as `launchName` on the `managedTabs` entry, `terminal.bindSession()`
 returns it when the session's first hook binds the tab (cwd match inside `BIND_WINDOW_MS`), and

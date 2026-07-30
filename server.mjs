@@ -300,6 +300,30 @@ function applyLaunchName(session, launchName) {
   if (name) session.title = name;
 }
 
+// The session's CURRENT name, as reported by a source that keeps reporting it:
+// Claude Code's own registry (`~/.claude/sessions/<pid>.json` `name`) and the
+// statusline payload (`session_name`). Both update the moment the developer runs
+// `/rename`, so this ADOPTS a changed name instead of only filling an empty one.
+//
+// That distinction is the bug this exists to fix (issue #23): every writer used to
+// be guarded on `!session.title`, so the first name a session ever had won
+// forever. A session auto-named `missioncontrolcenter-62` at startup kept that
+// label on the board through two renames, while the terminal tab and the Claude
+// prompt box both showed the new one.
+//
+// Still ignores an empty or unchanged name, so a registry file that carries no
+// name cannot blank a title we already have. applyLaunchName above stays
+// fill-only on purpose: it is a one-time hint from terminal.bindSession() joining
+// a `claude --name` launch to its session id, and it must never overwrite what
+// the session itself reports. Returns true when the title actually changed.
+function applyLiveName(session, rawName) {
+  if (!session) return false;
+  const name = typeof rawName === 'string' ? rawName.trim() : '';
+  if (!name || name === session.title) return false;
+  session.title = name;
+  return true;
+}
+
 // Create a session with defaults if missing, without downgrading anything
 // already tracked. Returns the (possibly existing) session object.
 function ensureSession(id, cwd, transcriptPath) {
@@ -750,10 +774,8 @@ function handleStatusline(payload) {
       session.ctxSize = ctx.context_window_size;
       changed = true;
     }
-    if (typeof payload.session_name === 'string' && payload.session_name.trim() && !session.title) {
-      applyLaunchName(session, payload.session_name);
-      changed = true;
-    }
+    // Live name: follows a /rename, see applyLiveName.
+    if (applyLiveName(session, payload.session_name)) changed = true;
     // Always advance so the next broadcast (triggered by a real change, here
     // or on a later event) carries a fresh recency timestamp, without forcing
     // a broadcast purely because time passed (statusline fires frequently).
@@ -1035,11 +1057,10 @@ function reconcileSessionRegistry() {
     // name is a direct, universal source for a session's display name (every
     // named session, not only ones launched from Mission Control), strictly
     // better than the bindSession deferred-join, which stays in place as a
-    // fallback for the moment before this registry file exists.
-    if (typeof entry.name === 'string' && entry.name.trim() && !session.title) {
-      applyLaunchName(session, entry.name);
-      changed = true;
-    }
+    // fallback for the moment before this registry file exists. It also tracks
+    // `/rename`, so it is adopted on every change rather than only when the
+    // title is still empty (see applyLiveName).
+    if (applyLiveName(session, entry.name)) changed = true;
 
     const statusUpdatedAt = typeof entry.statusUpdatedAt === 'number' ? entry.statusUpdatedAt : null;
     const trustworthy = statusUpdatedAt === null || now - statusUpdatedAt <= REGISTRY_STALE_MS;
