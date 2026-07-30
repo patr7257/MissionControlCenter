@@ -4,7 +4,7 @@
 - Date: 2026-07-30
 - Branch: `main` (this handover is a docs-only commit straight to `main`, as agreed)
 - PRs this session: #17, #19, #21, #24 squashed and merged (issues #16, #18, #20, #22, #23 closed),
-  plus one FINAL PR carrying issue #25 (the header icon-button gap) together with these docs.
+  plus PR #26, the FINAL one, carrying issue #25 (the header icon-button gap) together with these docs.
 - CI green on every branch and on `main` after each merge.
 - Releases published automatically by those merges: `fleet-v0.1.9`, `0.1.10` (dead, see below),
   `0.1.11`, and **`fleet-v0.1.12`, which is what is installed and running**:
