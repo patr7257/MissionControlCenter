@@ -1329,6 +1329,53 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Open a folder in VS Code. One endpoint, two ways to name the folder:
+  // - { sessionId }: the session cards. The cwd is resolved SERVER side from the
+  //   sessions map, exactly as /focus and /reopen do, so a path the page invented
+  //   is never trusted when an id is available. Not bounded to ~/repos: a
+  //   session's cwd is our own data and may legitimately live anywhere.
+  // - { repo }: the New session popup's folder chain, i.e. a client-supplied
+  //   path. Bounded to the repos root, because the picker can only ever produce a
+  //   node from listRepos() and because a cross-origin POST with a text/plain
+  //   body is a simple request that needs no preflight.
+  // sessionId wins when both are present.
+  if (req.method === 'POST' && url === '/open-editor') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 5_000_000) req.destroy(); // guard against runaway payloads
+    });
+    req.on('end', () => {
+      let result;
+      try {
+        const payload = JSON.parse(body || '{}');
+        if (payload.sessionId) {
+          const session = sessions.get(payload.sessionId);
+          const cwd = session ? session.cwd : null;
+          result = cwd
+            ? terminal.openInVsCode(cwd)
+            : { ok: false, reason: 'bad-folder', error: 'No known working directory for this session' };
+        } else if (payload.repo) {
+          // path.resolve first so `..` is collapsed lexically: normalizePath only
+          // collapses it via realpath, which cannot resolve a path that does not
+          // exist, and a folder that was deleted must still report "no longer
+          // exists" rather than "outside the repos root".
+          const repo = path.resolve(String(payload.repo));
+          result = terminal.isInsideReposRoot(repo)
+            ? terminal.openInVsCode(repo)
+            : { ok: false, reason: 'outside-root', error: 'That folder is outside the repos root.' };
+        } else {
+          result = { ok: false, reason: 'bad-folder', error: 'No session or folder given' };
+        }
+      } catch (error) {
+        result = { ok: false, reason: 'spawn-failed', error: String(error) };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(result));
+    });
+    return;
+  }
+
   if (req.method === 'GET') {
     serveStatic(res, url);
     return;

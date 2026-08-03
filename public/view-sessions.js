@@ -276,6 +276,7 @@
         '</span>' +
         '<span class="sc-acts">' +
           '<button type="button" class="sc-details">Details</button>' +
+          '<button type="button" class="sc-code" title="Open this folder in VS Code">VS Code</button>' +
           '<button type="button" class="sc-resume prim" style="display:none">Resume</button>' +
           '<button type="button" class="sc-reopen">Take Control</button>' +
         '</span>' +
@@ -294,6 +295,7 @@
       model: el.querySelector('.sc-model'),
       badge: el.querySelector('.sc-badge'),
       details: el.querySelector('.sc-details'),
+      code: el.querySelector('.sc-code'),
       resume: el.querySelector('.sc-resume'),
       reopen: el.querySelector('.sc-reopen'),
       _status: null, _isActive: null, _title: null, _where: null, _prompt: null,
@@ -313,6 +315,10 @@
     c.details.addEventListener('click', function (ev) {
       ev.stopPropagation();
       Store.selectSession(c._id);
+    });
+    c.code.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      openCardInEditor(c);
     });
     c.resume.addEventListener('click', function (ev) {
       ev.stopPropagation();
@@ -391,6 +397,45 @@
     }, function () { doReopen(c); });
   }
   function resumeCard(c) { doReopen(c); }
+
+  // Open this session's folder in VS Code. Deliberately NOT behind a confirm the
+  // way Take Control is: opening an editor creates nothing, mutates nothing, is
+  // undone with Ctrl+W, and is idempotent (VS Code forwards the folder to a
+  // running instance and focuses it), so a second click is harmless. Only the
+  // sessionId is sent: the server resolves the cwd itself, as with /focus.
+  function openCardInEditor(c) {
+    if (c.code.disabled) return; // a disabled button dispatches no click, so this
+    c.code.disabled = true;      // is belt and braces against a double fire
+    // Release on a timer as well, so a promise that never settles cannot leave
+    // the affordance permanently dead.
+    var released = false;
+    var release = function () {
+      if (released) return;
+      released = true;
+      c.code.disabled = false;
+    };
+    var settle = setTimeout(release, 1500);
+    return fetch('/open-editor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: c._id })
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (!data || data.ok === false) {
+        // The server names the real reason (no VS Code found, folder gone); a
+        // generic line only when there is nothing to quote.
+        showToast((data && data.error) ? String(data.error) : 'Could not open VS Code.');
+      } else {
+        // Present continuous on purpose: we started a detached GUI process and
+        // never learn whether a window appeared, so "Opened" would overclaim.
+        showToast('Opening ' + (c._title || 'that folder') + ' in VS Code.');
+      }
+    }).catch(function () {
+      showToast('Could not reach the server to open VS Code.');
+    }).then(function () {
+      clearTimeout(settle);
+      release();
+    });
+  }
 
   // ---- In-app confirm (markup in index.html). window.confirm() cannot be
   // styled at all, and in the Electron shell it renders as a bare OS dialog
@@ -810,6 +855,43 @@
     });
   }
 
+  // Open the folder the dropdowns currently point at in VS Code, without
+  // launching a session. The popup deliberately stays open and the Name field is
+  // not cleared: looking at a repo and then starting a session in it is the
+  // natural sequence.
+  //
+  // Feedback goes into #newSessionFeedback, NOT showToast: .toast is z-index 50
+  // while .pop-backdrop is 100 (with a blurred translucent background), so a
+  // toast raised from inside the modal would render behind it.
+  function openLaunchPathInEditor() {
+    var btn = document.getElementById('newSessionCodeBtn');
+    var feedback = document.getElementById('newSessionFeedback');
+    var repoPath = currentLaunchPath();
+    if (!repoPath) {
+      if (feedback) feedback.textContent = 'Pick a folder first.';
+      return;
+    }
+    var label = baseName(repoPath);
+    if (btn) btn.disabled = true;
+    if (feedback) feedback.textContent = 'Opening ' + label + ' in VS Code...';
+    fetch('/open-editor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: repoPath })
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (feedback) {
+        feedback.textContent = (data && data.ok === false)
+          ? (data.error ? String(data.error) : 'Could not open VS Code.')
+          : 'Opening ' + label + ' in VS Code';
+      }
+    }).catch(function () {
+      if (feedback) feedback.textContent = 'Could not open VS Code.';
+    }).then(function () {
+      if (btn) btn.disabled = false;
+      setTimeout(function () { if (feedback) feedback.textContent = ''; }, 2500);
+    });
+  }
+
   // ---- New session popup chrome (Esc closes, backdrop click closes, focus
   // moves to Name on open and back to the opener button on close). The popup
   // markup lives outside #viewSessions in index.html (a fixed backdrop), so
@@ -851,6 +933,8 @@
     }
     var accSel = document.getElementById('newSessionAccount');
     if (accSel) accSel.addEventListener('change', function () { accountManualOverride = true; });
+    var codeBtn = document.getElementById('newSessionCodeBtn');
+    if (codeBtn) codeBtn.addEventListener('click', openLaunchPathInEditor);
     var cancelBtn = document.getElementById('newSessionCancelBtn');
     if (cancelBtn) cancelBtn.addEventListener('click', closeNewSessionPopup);
     var backdrop = document.getElementById('newSessionBackdrop');

@@ -86,7 +86,7 @@
   </div>
 
   <div class="pop-backdrop" id="newSessionBackdrop" style="display:none">
-    <div class="pop" id="newSessionPopup" role="dialog" aria-modal="true" aria-labelledby="newSessionPopupTitle">
+    <div class="pop newsession-pop" id="newSessionPopup" role="dialog" aria-modal="true" aria-labelledby="newSessionPopupTitle">
       <div class="pop-head"><b id="newSessionPopupTitle">New session</b><span>esc to close</span></div>
       <div class="pop-body">
         <div class="fld">
@@ -105,6 +105,7 @@
       </div>
       <div class="pop-foot">
         <span class="path" id="newSessionPath"></span>
+        <button id="newSessionCodeBtn" class="ghostbtn" type="button" title="Open the selected folder in VS Code">VS Code</button>
         <button id="newSessionCancelBtn" class="ghostbtn" type="button">Cancel</button>
         <button id="newSessionBtn" class="gobtn" type="button">Launch</button>
       </div>

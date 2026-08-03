@@ -219,7 +219,10 @@
 .sc-meta b { color: var(--dim); font-weight: 600; }
 .sc-model { font-variant-numeric: tabular-nums; }
 .sc-badge { font-variant-numeric: tabular-nums; }
-.sc-acts { margin-left: auto; display: flex; gap: 8px; }
+/* Wraps (right-aligned) rather than overflowing the card: there are up to three
+   visible buttons now that VS Code sits next to Details, and .sc-foot's own
+   flex-wrap can only move the whole group, not split it. */
+.sc-acts { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
 /* ---- Details / Resume / Reopen: a real footer row, never absolutely
    positioned, so they can never overlap the heading or the ring. ---- */
@@ -298,7 +301,23 @@
 .pop-body { padding: 16px; display: grid; gap: 14px; }
 .fld { display: grid; gap: 7px; }
 .fld > label { font: 650 10.5px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
-.chain { display: flex; gap: 8px; flex-wrap: wrap; }
+/* The cascading folder chain must stay on ONE row. With flex-wrap the 4th select
+   dropped to a new line the moment a third level was picked, so deepening the
+   chain read as the picker breaking. min-width: 0 is the load-bearing half: a
+   flex item defaults to min-width:auto, which on a <select> resolves to its
+   content width, so a long folder name forced the row wider than the panel
+   instead of shrinking the control. Same trap as the .session-card
+   minmax(0, 1fr) note in CLAUDE.md, and just as invisible to static review. */
+.chain { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center; }
+.chain > .sel { flex: 1 1 0; min-width: 0; width: auto; }
+/* Graceful degradation: at phone-ish widths five equal tracks would be ~55px
+   slivers, so wrapping comes back with a real basis (about 2 per row) rather than
+   staying on one unreadable line. Deliberately not an overflow-x scroller: that
+   is defensible for one unsplittable control, not for fields that must be SET. */
+@media (max-width: 560px) {
+  .chain { flex-wrap: wrap; }
+  .chain > .sel { flex: 1 1 140px; }
+}
 .sel, .inp {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
   padding: 7px 10px; font: inherit; font-size: 12.5px;
@@ -316,6 +335,14 @@
 .sel:focus, .inp:focus, .gobtn:focus-visible, .ghostbtn:focus-visible {
   outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,156,255,0.25);
 }
+/* ---- New session popup: wider than the rest of the .pop family because the
+   cascading folder chain needs 3 to 4 selects on ONE row (see .chain above).
+   Deliberately a popup-specific cap and never a change to .pop itself, which
+   would widen the confirm and the Settings dialog too. 760px gives four tracks of
+   (760 - 32 body padding - 24 gaps) / 4 = 176px, and five (the picker's
+   MAX_SELECTORS) about 139px. Under a ~792px viewport the backdrop's own 16px
+   padding already bounds the panel, so this cap is inert on a phone. ---- */
+.pop.newsession-pop { max-width: 760px; }
 /* ---- Settings popup: app-level preferences plus the shortcuts guide. Wider
    than the confirm because the guide is a two-column list. ---- */
 .pop.settings-pop { max-width: 560px; }
@@ -349,6 +376,10 @@
 .pop-foot { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-top: 1px solid var(--line); background: #121722; }
 .pop-foot .path { font: 11px/1.4 var(--mono); color: var(--muted); margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ghostbtn {
+  /* nowrap for the same reason .gobtn has it: the footer's .path takes all the
+     free space, so a two-word label ("VS Code") broke onto a second line and made
+     the button taller than its neighbours. */
+  white-space: nowrap;
   background: transparent; color: var(--muted); border: 1px solid var(--line);
   border-radius: 8px; padding: 7px 12px; font: 650 12px/1.4 var(--sans); cursor: pointer;
 }
