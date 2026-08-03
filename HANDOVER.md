@@ -2,26 +2,29 @@
 
 ## Date, branch, PR, CI
 - Date: 2026-08-03
-- Branch: `main`, clean at `946c62e`. This handover is a docs-only commit straight to `main`, as
+- Branch: `main`, clean at `5c19a56`. This handover is a docs-only commit straight to `main`, as
   agreed for handover docs.
-- PRs this session: **#28 merged** (`a440847`, issue #27) and **#30 merged** (`946c62e`, issue #29).
-  Both board cards Done, no open PRs, no open issues.
+- PRs this session, all merged: **#28** (`a440847`, issue #27), **#30** (`946c62e`, issue #29) and
+  **#32** (`5c19a56`, issue #31). Every board card Done, no open PRs, no open issues, `main` is the
+  only branch local and remote.
   `https://github.com/patr7257/MissionControlCenter/pull/28`
   `https://github.com/patr7257/MissionControlCenter/pull/30`
+  `https://github.com/patr7257/MissionControlCenter/pull/32`
 - CI green on every branch commit and on `main` after each merge. The CI gate is now FIVE steps: the
   `.mjs` syntax sweep, `smoke-server.mjs`, `check-desktop-package.mjs`, `check-installer-launch.mjs`
   and the new `check-flag-resume.mjs`.
-- Releases published automatically by those merges: **`fleet-v0.1.14`** and **`fleet-v0.1.15`**, each
-  with its MSI attached (111 MB).
-  `https://github.com/patr7257/MissionControlCenter/releases/tag/fleet-v0.1.15`
-- **The installed app is still 0.1.13 and was running the whole session** (Patrick started it at
-  08:42, so it was deliberately left alone). Nothing shipped this session has been seen in a packaged
-  install. The updater's READ path is verified against the real releases:
-  `findNewerRelease('0.1.13')` returns the newer tag, `findNewerRelease` of the newest returns `null`.
-- **GitHub auth was repaired**: `~/.config/gh-personal/hosts.yml` had drifted to `user: przrm`, which
-  is why issue #27 and PR #28 were authored by the work account and why `gh pr ready` and `git push`
-  failed with permission errors. It now resolves to `patr7257`; the work dir and the machine-wide file
-  were not touched (verified by mtime).
+- Releases published automatically by those merges: `fleet-v0.1.14`, `fleet-v0.1.15` and
+  **`fleet-v0.1.16`**, each with its MSI attached (111 MB).
+  `https://github.com/patr7257/MissionControlCenter/releases/tag/fleet-v0.1.16`
+- **Patrick installed 0.1.15 mid-session and confirmed the Resume button works**, which is the first
+  time anything from this session ran in a packaged install. **0.1.16 is now out and NOT yet
+  installed**: it adds only `--find` (a CLI change), so the UI is identical to 0.1.15.
+- **GitHub auth was repaired and then made self-diagnosing.**
+  `~/.config/gh-personal/hosts.yml` had drifted to `user: przrm`, which is why issue #27 and PR #28
+  were authored by the work account and why `gh pr ready` and `git push` failed. All three configs are
+  now correct with the full scope set, `przrm` is a collaborator here (so a wrong-account session
+  degrades to "works anyway"), and the whole class is one command: see the new
+  `~/.claude/scripts/gh-auth.ps1` below.
 
 ## READ THIS FIRST: two traps that cost real time
 1. **A spawn shape can be provably correct and still do nothing.** Three separate bugs in the VS Code
@@ -52,6 +55,13 @@ Shipped in `fleet-v0.1.15` (PR #30, issue #29): **runtime ring, quota bars, and 
 - **`/resume-later`** flags the session you are in; an amber **Resume session** button lists flagged
   sessions with per-row Resume and Unflag. Resuming reattaches AND clears the flag in one call.
 
+Shipped in `fleet-v0.1.16` (PR #32, issue #31): **flag an earlier session by NAME**.
+- `flag-resume.mjs --find "<session name>"` resolves a name to that session's id AND cwd, because a
+  name is what Claude Code leaves you with when a session ends (`claude --resume "<name>"`). Plus
+  `--cwd` for the manual case. Refuses on 0 or 2+ matches rather than guessing.
+- Prompted by Patrick pasting five ended sessions and asking for them to be flagged. All five are
+  flagged now (see Environment state).
+
 Not started (carried over):
 - `desktop/assets/statusline-feed.mjs.cmd` wrapper, so quota meters and context rings populate in a
   packaged install. **Still the top remaining item, and it now matters more**: the 5 hour bar is the
@@ -62,13 +72,17 @@ Not started (carried over):
 - `public/demo.js` knows nothing about the new rings/bars/flags, so `?demo=1` shows the old shape.
 
 ## Prioritized next steps
-1. **Install 0.1.15 through the in-app banner, not by hand.** That is still the one unproven path
-   (see the 2026-07-30 note): watch for a `cmc-update-*` dir under `%TEMP%` holding the 0.1.15 MSI,
-   then the app quitting seconds later. Everything from both PRs is invisible until you do.
-2. **Add `desktop/assets/statusline-feed.mjs.cmd`** and set `CMC_STATUSLINE_COMMAND` in
-   `desktop/main.mjs`, or the new 5 hour bar renders blank in the installed app.
-3. Use `/resume-later` for real on the next session you park, and say whether the picker wants
-   anything else (a "resume in a new window" option, sorting, an age cutoff).
+1. **Add `desktop/assets/statusline-feed.mjs.cmd`** and set `CMC_STATUSLINE_COMMAND` in
+   `desktop/main.mjs`. This is now the clear top item: 0.1.15 is installed, so the 5 hour bar and the
+   context rings are visibly blank in the running app until this exists.
+2. **Install 0.1.16 via Mission Control Center -> Check for updates.** It only adds the `--find` CLI,
+   so nothing visual changes, but it keeps the installed copy current and exercises the
+   download-and-install path again (0.1.15 was the first time that path ran for real).
+3. Resume one of the five flagged sessions from the button and confirm the tab opens in the RIGHT
+   folder. The cwd is resolved per flag, and for the four flagged by name it came from the board's
+   `sessions.json` rather than from being observed live, so this is the one part proven only by
+   construction and not yet by a real reattach.
+4. Say whether the picker wants more: a "resume in a new window" option, sorting, an age cutoff.
 4. Decide whether `scripts/render-check.mjs` should run in CI. It is now 131 assertions and the only
    automated cover for the rings, the bars, the picker, the popups and the shortcuts, and it skips
    with exit 0 without a browser, so it needs a browser step on the runner.
@@ -98,6 +112,16 @@ A design-review preview that CANNOT disturb the running app (reads real sessions
 writes nothing, never takes the hook lock). **Do not use 4318: that is the smoke suite's port.**
 ```
 cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; $env:CMC_DRY_RUN='1'; node server.mjs --port 4319
+```
+Check which GitHub account every gh config is really using, and what is wrong (run this FIRST for any
+gh auth, scope or permission problem; `-Mode fix` repairs account drift with no browser, and
+`-Mode refresh -Target personal|work|default` prints the line to paste in your OWN terminal):
+```
+powershell -File "C:\Users\pr\.claude\scripts\gh-auth.ps1"
+```
+Flag an EARLIER session by the name Claude Code printed when it ended:
+```
+node "C:/Users/pr/.claude/skills/agent-fleet-monitor/scripts/flag-resume.mjs" --find "FORSIA DOCS UPDATE"
 ```
 See what is flagged for resume, and flag or unflag the session you are in:
 ```
@@ -161,6 +185,17 @@ cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; git tag fleet-v0.2.0; gi
   rewrites ONLY that directory. Never the machine-wide `gh auth switch`.
 - **GitHub refuses self-approval**, so `gh pr review --approve` cannot be used on your own PR. Merging
   works because nothing requires a review.
+- **A resume flag needs a cwd, not just a session id.** The flag's cwd becomes the reattached tab's
+  working directory, so `process.cwd()` as a fallback is only ever right for "flag the session I am
+  in". Flagging someone else's session by id alone silently recorded the script's own directory.
+- **`gh auth refresh` cannot run inside a Claude session at all.** It is an OAuth device flow (prints
+  a one-time code, waits for Enter, needs a browser), and through the `!` prefix it fails outright
+  with "--hostname required when not running interactively". Never attempt it: hand over the line.
+  `~/.claude/scripts/gh-auth.ps1 -Mode refresh` now refuses when `CLAUDECODE` is set and prints the
+  exact line instead, which is what stops the "I ran it and nothing changed" loop.
+- **`gh auth refresh -s <scope>` can REDUCE a token**, resetting it to gh's default minimum and
+  dropping `project` and `workflow`. Always pass the full list. Confirmed twice on 2026-08-03, in two
+  different sessions.
 - Still true from before: `wt` splits on `;` even inside one quoted argument; an updater only fixes
   FUTURE hops; a packaged app is a separate allowlist from the repo; `server.lock` can be hijacked by a
   test server (always `CMC_DRY_RUN=1` plus a temp HOME); PowerShell 5.1 `-Encoding utf8` writes a BOM
@@ -179,22 +214,29 @@ cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; git tag fleet-v0.2.0; gi
   PatrickRobelWeb's `HANDOVER.md` is stale.
 
 ## Environment state
-- **The installed Mission Control Center 0.1.13 is STILL RUNNING** on port 4317 (pid 8552, started
-  08:42 by Patrick). Never touched: this session started no long-lived server of its own. Its hooks and
-  statusline wrap are therefore still registered in `~/.claude/settings.json`, which is normal while
-  the app is open.
-- Every preview and test server this session is stopped; ports 4318 to 4322 are free and the real
-  `server.lock` still points at pid 8552 on 4317.
-- **A new junction exists**: `~/.claude/skills/resume-later` -> `<repo>/skills/resume-later`, which is
-  what makes `/resume-later` available from any repo. Same mechanism as the existing
-  `~/.claude/skills/agent-fleet-monitor` junction.
-- **This session is flagged for resume** (`MCC vscode open button`, note "wrapping up, resume after the
-  release"), written with the real `/resume-later` path as its end-to-end test. After installing 0.1.15
-  the Resume session button will show `1` and list it. Unflag it from the app if you do not want it.
-- `~/.config/gh-personal/hosts.yml` now has `user: patr7257`. The work dir and the machine-wide config
-  were not modified.
-- `main` is the ONLY worktree and the ONLY branch, local and remote. Both session worktrees and both
-  feature branches are gone. No Docker, no keep-awake, no cron or scheduled jobs.
+- **The installed Mission Control Center 0.1.15 is RUNNING** on port 4317 (pid 40760, started 20:16 by
+  Patrick when he installed it). Never touched by this session, which started no long-lived server of
+  its own. Its hooks and statusline wrap are registered in `~/.claude/settings.json`, which is normal
+  while the app is open, and `server.lock` correctly points at that pid.
+- Every preview and test server this session is stopped. Ports 4318 to 4322 are free.
+- **FIVE sessions are flagged for resume**, all verified through the running app's `/resume-flags`:
+  `Samberg VIBE Extension` (repos\claude-setup), `ZRM DOCS: Fix zeptomail send` (zrm-docs),
+  `FORSIA DOCS UPDATE` (zrm-docs-customer-forsia), `TimetrackerProjects` (2-ZRM\customers) and
+  `MCC vscode open button` (this session). Each cwd was resolved per flag and matches the shell prompt
+  Patrick pasted. Unflag any of them from the app.
+- **A stray `node server.mjs` (pid 30892) is listening on port 3001**, orphaned since 17:23 with a dead
+  parent. It is NOT this project: this server defaults to 4317, so 3001 belongs to another repo's dev
+  server. Deliberately left alone under the never-kill-another-project's-server rule. Kill it yourself
+  if it is not wanted: `Stop-Process -Id 30892 -Force`.
+- **Two junctions now exist** under `~/.claude/skills`: `agent-fleet-monitor` (pre-existing) and
+  `resume-later` -> `<repo>/skills/resume-later`, which is what makes `/resume-later` work from any
+  repo.
+- **New machine tooling**: `~/.claude/scripts/gh-auth.ps1`, and the global `CLAUDE.md` gh section now
+  leads with "run the script, do not improvise a diagnosis". All three gh configs verified correct with
+  the full scope set at session end.
+- `main` is the ONLY worktree and the ONLY branch, local and remote. All three session worktrees and
+  all three feature branches are gone. No Docker (engine down, no Claude marker), no keep-awake, no
+  cron or scheduled jobs.
 - Exactly ONE VS Code window is open (`MW_service_tool`, Patrick's own, untouched). Every probe window
   created this session was closed again, confirmed by enumerating window titles.
 - Screenshots and probe scripts stayed in the session scratchpad; nothing landed in the repo.
