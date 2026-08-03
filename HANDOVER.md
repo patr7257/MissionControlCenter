@@ -1,112 +1,82 @@
 # HANDOVER
 
 ## Date, branch, PR, CI
-- Date: 2026-07-30
-- Branch: `main` (this handover is a docs-only commit straight to `main`, as agreed)
-- PRs this session: #17, #19, #21, #24 squashed and merged (issues #16, #18, #20, #22, #23 closed),
-  plus PR #26 (issue #25, the header icon-button gap, together with these docs), also merged.
-- Board all Done, no open PRs, no open issues.
-- CI green on every branch and on `main` after each merge.
-- Releases published automatically by those merges: `fleet-v0.1.9`, `0.1.10` (dead, see below),
-  `0.1.11`, `0.1.12`, and **`fleet-v0.1.13`, which is what is installed and confirmed working**:
-  `https://github.com/patr7257/MissionControlCenter/releases/tag/fleet-v0.1.13`
-- Installed build verified end to end: `FileVersion 0.1.13`, the app's own update check reports
-  "You are on the latest version (0.1.13)", and two fixes were confirmed by eye in the running app:
-  the header icon buttons are one pair at the right end, and a session card shows the RENAMED title
-  (`MCC new fixes`) where it used to be stuck on the auto-generated `missioncontrolcenter-62`.
+- Date: 2026-08-03
+- Branch: `main`, clean and up to date at `a440847`. This handover is a docs-only commit straight to
+  `main`, as agreed for handover docs.
+- PR this session: **#28 merged** (squash, `a440847`), closing issue **#27**. Board card Done.
+  `https://github.com/patr7257/MissionControlCenter/pull/28`
+- CI green on both branch commits (`98f6af5`, `436a037`) and on `main` after the merge.
+- Release published automatically by the merge: **`fleet-v0.1.14`** with its MSI attached (111.3 MB).
+  `https://github.com/patr7257/MissionControlCenter/releases/tag/fleet-v0.1.14`
+- **The installed app is still 0.1.13 and was running throughout** (Patrick started it at 08:42, so
+  it was deliberately left alone). The updater READ path was verified against the real release:
+  `findNewerRelease('0.1.13')` returns `fleet-v0.1.14` and `findNewerRelease('0.1.14')` returns
+  `null`. Nothing in 0.1.14 has been seen in a packaged install yet.
 
-## READ THIS FIRST: three traps this session paid for in full
-1. **`wt` splits on `;` even inside ONE quoted argument.** Every `; ...` segment becomes another tab
-   whose "executable" is the segment text (`0x80070002`), while the first tab runs only the fragment
-   before the first `;`. That is why every launch produced four junk tabs and never started Claude.
-   The hosted PowerShell script now travels as base64 UTF-16LE via `-EncodedCommand`. **Never go
-   back to `-Command` with a `; `-joined string.**
-2. **An updater only fixes FUTURE hops.** The build performing an upgrade is the INSTALLED one, so a
-   fix to the updater does nothing for the very next upgrade. Every updater change costs exactly one
-   manual install to escape the old build. This cost two full round trips before it was said out
-   loud; it is now the first rule in the `self-updating-desktop-app` skill.
-3. **A packaged app can be dead while the repo copy is perfect.** electron-builder's `files` was an
-   explicit allowlist, so a new module was imported but never packaged and 0.1.10 could not start at
-   all (`ERR_MODULE_NOT_FOUND`). `scripts/check-desktop-package.mjs` now fails on exactly that, and
-   it runs in CI.
+## READ THIS FIRST: a static-and-dry-run-clean spawn can still do nothing
+Three separate bugs in this session's feature passed every `node --check`, every dry run and every
+static review, and only fell out of really spawning the thing and then ENUMERATING WINDOW TITLES to
+ask "did a window actually appear?". `Get-Process | MainWindowTitle` is not enough: extra Electron
+windows live in the same process, so a second VS Code window never shows up there. Use
+`EnumWindows` + `GetWindowText` via `Add-Type` (read-only, no focus stealing).
+
+1. **`ELECTRON_RUN_AS_NODE=1` turns `Code.exe` into a bare Node interpreter**, which tries to
+   `require` the folder path and exits 1 with nothing visible. `desktop/main.mjs` spawns
+   `server.mjs` with exactly that variable, so every packaged install would have been dead.
+   A Claude Code session's own env has it too, which is how it surfaced.
+2. **A non-detached spawn opened no window at all.** A second `Code.exe` only forwards the folder to
+   the running instance over a named pipe and exits, so being killed mid-handoff loses the request.
+3. **An 8s cap on the close query reported real closes as timeouts**, because a close genuinely
+   costs about 6s. That mistake left three stale VS Code windows on the desktop mid-test.
 
 ## TLDR of session outcome
-Shipped in `fleet-v0.1.9` (PR #17, issue #16):
-- **The semicolon fix** in both `launchSession()` and `reopenSession()`, plus `firstSemicolonArg()`
-  refusing a repo path that contains a `;` rather than spawning junk, the fallback tab title going
-  through `sanitizeSessionName()` too, and `reopenSession()` unbinding prior `managedTabs` entries
-  only once the command is known launchable.
-- **"Reopen" became "Take Control"** with an in-app styled confirm replacing `window.confirm`
-  (a native confirm renders in Electron as a bare OS dialog titled "Mission Control Center").
+Shipped in `fleet-v0.1.14` (PR #28, issue #27): open AND close a repo's VS Code window from
+Mission Control, with no terminal window involved at any point.
 
-Shipped in `fleet-v0.1.11` (PRs #19 and #21, issues #18 and #20):
-- **The in-app updater works.** `launchInstaller()` passed the whole `cmd /c ping ... & msiexec /i
-  "<path>"` line as one argv element, so Node escaped the inner quotes as `\"`, cmd.exe passed that
-  through literally, and msiexec hunted for a file whose name contained quote characters. Fixed with
-  `windowsVerbatimArguments: true` in the new `desktop/installer-cmd.mjs`. A second trap found while
-  writing the test: the command line must NOT start with a quote, or `cmd /c` strips the outer pair
-  and a quoted program path with spaces breaks. The unquoted leading `ping` prevents it.
-- **The packaging guard** (`scripts/check-desktop-package.mjs`) after 0.1.10 shipped dead, plus
-  `files: ["*.mjs", "preload.cjs"]` so a new module ships automatically.
-- Update temp dirs are swept (one 100+ MB MSI per attempt used to be left behind forever; 8 dirs and
-  778 MB were found).
+- **Open**: a `VS Code` button in every session card footer (opens that session's `cwd`) and one in
+  the New session popup footer (opens the folder the dropdowns point at, no session launched).
+  `terminal.openInVsCode()` plus `POST /open-editor`. Spawns `Code.exe` directly, never `code.cmd`
+  (Node needs a shell for a `.cmd`, and that shell is the console flash), never through `wt` (a
+  self-closing tab would shift every later tab index and break the positional `tabIndex` invariant
+  in `managedTabs`).
+- **Close**: a `Close VS Code` button, shown only while this app has a record of opening an editor
+  for that folder, plus an in-app offer when a session ends ("Session ended. Close the VS Code
+  window Mission Control opened for it?"). `terminal.closeEditor()` plus `POST /close-editor`.
+- **The New session popup is wider** (760px) and the folder chain no longer wraps, so three to four
+  cascading folder selects sit on one row instead of the fourth dropping to a new line.
+- Verification grew a lot: `scripts/smoke-server.mjs` covers both endpoints, the command shape, the
+  env sanitising, path validation and containment, and asserts the close script posts `WM_CLOSE`
+  while containing no `SendKeys`/`AppActivate`/`SetForegroundWindow`. `scripts/render-check.mjs` is
+  now **109 assertions** and gained a fifth screenshot (the session-ended offer).
 
-Shipped in `fleet-v0.1.12` (PR #24, issues #22 and #23):
-- **`/rename` reaches the board.** `session.title` was write-once (every writer guarded on
-  `!session.title`), so the first name a session ever had won forever: this repo's session kept the
-  auto-generated `missioncontrolcenter-62` through two renames. New `applyLiveName()` adopts a
-  CHANGED name from the registry's `name` and the statusline's `session_name`;
-  `applyLaunchName()` stays fill-only on purpose.
-- **Keyboard and mouse shortcuts** in `public/shortcuts.js`: mouse side buttons and `Alt+←`/`Alt+→`
-  for back/forward through the app's own history, `Esc` to leave a session, `N`, `S`, `1`/`2`/`3`,
-  `,`, `?`/`F1`. One `BINDINGS` registry is the single source of truth for both the handler and the
-  guide.
-- **A Settings popup** behind a gear button next to the stats button, holding the generated
-  shortcuts guide and the first real setting (mouse navigation, persisted to
-  `localStorage.cmcSettings`). This is where future settings go: add a `.set-section`.
-- **Session cards are keyboard reachable** (`tabindex`, `role=button`, Enter/Space jumps to the
-  terminal). Before this, Tab skipped every card and the primary action was mouse-only.
-
-Outside this repo:
-- **Fixed a broken global SessionStart hook** in `~/.claude/settings.json`: the HANDOVER notice had
-  `$t=` inside a double-quoted command, which the outer shell expanded to nothing, so every session
-  logged `The term '=' is not recognized` and the notice never printed. Rewritten with the timestamp
-  inlined; tested through both bash and PowerShell.
-- **`~/.claude/skills/self-updating-desktop-app` was rewritten** from this session's failures: it was
-  124 lines, jpackage-only, release-on-tag-only, and knew nothing about Electron. Now 275 lines plus
-  `references/auto-release-on-merge.md` (this repo's workflow, copyable) and
-  `references/electron-packaging-guards.md` (both guard scripts), with the updater-only-fixes-future-
-  hops rule, both install-launch traps, and a failure-class-to-detection-method table.
-
-Not started (carried over):
-- `desktop/assets/statusline-feed.mjs.cmd` wrapper, so the quota meters and context rings populate in
-  a packaged install instead of only when running the repo copy. **This is the top remaining item.**
+Not started (carried over from 2026-07-30):
+- `desktop/assets/statusline-feed.mjs.cmd` wrapper, so quota meters and context rings populate in a
+  packaged install. **Still the top remaining item.**
 - patrickrobelweb web embed of the `?demo=1` showcase.
 - Humaaans CC-BY credit line + SKILL.md note.
 - Demo confetti beat (the demo loop ends on an error, so all-done confetti never fires).
 
 ## Prioritized next steps
-1. Use the new shortcuts for real for a while (mouse side buttons, `Alt+←`, `1`/`2`/`3`, `?`) and say
-   what is missing. Cards are focusable now, so a `j`/`k` or arrow-key selection with Enter to jump
-   is the obvious next increment if Tab is not enough.
-2. Add `desktop/assets/statusline-feed.mjs.cmd` (mirroring `send-event.mjs.cmd`) and set
-   `CMC_STATUSLINE_COMMAND` in `desktop/main.mjs`. Until then the packaged app's quota meters and
-   context rings stay blank, and the installed app only shows them because system Node happens to be
-   on this machine.
-3. Decide whether `scripts/render-check.mjs` should run in CI. It skips with exit 0 without a
-   browser, so it needs a browser step on the runner. It is the only automated cover for the Take
-   Control dialog and the shortcuts.
-4. Confirm the two remaining best-effort behaviours by hand: `wt focus-tab` against a COLD managed
+1. **Install 0.1.14 and use the new buttons for real.** Accept the in-app update banner rather than
+   installing by hand: that finally exercises the download-and-install path, which is STILL unproven
+   from a fixed build (see 2026-07-30's step 5). Watch for a `cmc-update-*` dir under `%TEMP%`
+   holding the 0.1.14 MSI, then the app quitting a few seconds later.
+2. Say whether the end-of-session offer needs a Settings toggle. It currently fires whenever a
+   session ends AND this app opened its editor, with no way to silence it (deliberate: only the
+   in-app confirm was chosen, no native toast, no toggle).
+3. Fix `~/.config/gh-personal/hosts.yml`, which has drifted to `user: przrm`. That is why issue #27
+   and PR #28 were authored by the work account on a personal repo, and why `gh pr ready` failed
+   with a permissions error until a per-process `GH_TOKEN` was used. One line inside that config
+   dir fixes it; it must NOT be fixed with a machine-wide `gh auth switch`.
+4. Add `desktop/assets/statusline-feed.mjs.cmd` (mirroring `send-event.mjs.cmd`) and set
+   `CMC_STATUSLINE_COMMAND` in `desktop/main.mjs`.
+5. Decide whether `scripts/render-check.mjs` should run in CI. It is now the only automated cover
+   for the Take Control dialog, the shortcuts, the popup geometry AND both VS Code actions, and it
+   skips with exit 0 without a browser, so it needs a browser step on the runner.
+6. Confirm the two remaining best-effort behaviours by hand: `wt focus-tab` against a COLD managed
    window, and whether the `SetForegroundWindow` nudge raises the window or only flashes the taskbar
-   icon while the app is in the background.
-5. **The updater DOWNLOAD-AND-INSTALL path is still unproven from a fixed build.** Its read path is
-   proven (0.1.13 correctly reports "You are on the latest version") and the command shape is proven
-   by `scripts/check-installer-launch.mjs`, but every install this session ended up being done by
-   hand from `Downloads`. Next time a release lands, accept the banner and watch for two things: a
-   `cmc-update-*` dir under `%TEMP%` holding the NEW version MSI (proves the download ran), and the
-   app quitting a few seconds later (proves teardown plus msiexec ran). If that temp dir holds only
-   an OLDER MSI, the banner was simply never accepted and nothing is broken: that is what misled me
-   into reporting a stalled upgrade near the end of this session.
+   icon.
 
 ## Verbatim resume commands (PowerShell first)
 Start the app from the repo (installs hooks AND the statusline wrap, serves http://localhost:4317):
@@ -121,18 +91,27 @@ Server + wire + installer-command checks (same as CI):
 ```
 cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node scripts\smoke-server.mjs; node scripts\check-desktop-package.mjs; node scripts\check-installer-launch.mjs
 ```
-Real-browser check plus all three screenshots (board, Take Control, Settings) on the real Desktop:
+Real-browser check plus all five screenshots (board, Take Control, Settings, New session, session
+ended) on the real Desktop:
 ```
 cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; node scripts\render-check.mjs --shot "$env:USERPROFILE\OneDrive\Desktop\mcc-board.png"
 ```
+See which VS Code executable would be used, without opening anything:
+```
+cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; $env:CMC_DRY_RUN='1'; node -e "import('./terminal.mjs').then(t=>console.log(JSON.stringify(t.openInVsCode(process.cwd()),null,1)));"; Remove-Item Env:\CMC_DRY_RUN
+```
+Ask the server which VS Code window it would close for a folder, without closing it (dry run reports
+the exact PowerShell it would run, including the `WM_CLOSE` call and the title pattern):
+```
+cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; $env:CMC_DRY_RUN='1'; node -e "import('./terminal.mjs').then(async t=>{t.openInVsCode(process.cwd());console.log((await t.closeEditor(process.cwd())).script);});"; Remove-Item Env:\CMC_DRY_RUN
+```
+(To LIST real windows the way this session's three spawn bugs were found, write a throwaway
+`Add-Type` + `EnumWindows` script to the scratchpad rather than pasting one: the nested quoting does
+not survive a chat paste. `Get-Process code | Select-Object MainWindowTitle` is NOT a substitute, it
+only ever shows one window per process.)
 Inspect exactly what a launch would run, without opening a tab:
 ```
 cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; $env:CMC_DRY_RUN='1'; node -e "import('./terminal.mjs').then(t=>{const r=t.launchSession('C:/Users/pr/repos/2-ZRM/customers','customers','probe',null);console.log(r.command);console.log(r.script);});"; Remove-Item Env:\CMC_DRY_RUN
-```
-Prove a release MSI really contains what it should, without installing it (administrative install to
-a temp dir, the check that would have caught 0.1.10):
-```
-cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; $ex="$env:TEMP\mcc-extract"; Remove-Item -LiteralPath $ex -Recurse -Force -ErrorAction SilentlyContinue; msiexec /a "$env:USERPROFILE\Downloads\Mission.Control.Center.0.1.12.msi" /qn TARGETDIR="$ex"; Start-Sleep -Seconds 20; Get-ChildItem -LiteralPath $ex -Recurse -Filter *.mjs | Select-Object Name
 ```
 Check the lock file agrees with what is listening (the hook-delivery failure mode):
 ```
@@ -144,64 +123,67 @@ cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; git tag fleet-v0.2.0; gi
 ```
 
 ## Gotchas discovered this session
-- **`wt` splits on `;` even inside one quoted argument.** No generated `wt` argument may contain a
-  raw semicolon. `-EncodedCommand` (base64 UTF-16LE) removes semicolons, spaces, quotes and
-  non-ASCII bytes from the payload in one move, which also protects the `Røbel` in the git identity
-  vars from the console codepage.
-- **Node quotes a `cmd /c` argument and escapes inner quotes as `\"`, which cmd passes through
-  literally.** Symptom: "This installation package could not be opened" while a perfectly valid MSI
-  sits in `%TEMP%`. Use `windowsVerbatimArguments: true`.
-- **`cmd /c` strips the outer quote pair when the command line STARTS with a quote**, breaking a
-  quoted program path containing spaces. Keep an unquoted first token.
-- **An updater only fixes future hops** (see the top). Say it out loud before shipping one.
-- **A packaged app is a separate allowlist from the repo.** `files` omissions only fail at runtime on
-  the user's machine, after release. Prefer globs and keep the static guard.
-- **Verify an installer before blaming the download**: an MSI starts with `D0 CF 11 E0 A1 B1 1A E1`,
-  and `msiexec /a <msi> /qn TARGETDIR=<dir>` extracts it without installing, which is how "did my
-  new file actually ship" gets answered in seconds.
-- **A launch started from inside a Claude session is not a faithful test.** The child inherits
-  `CLAUDE_CODE_CHILD_SESSION`, so it never registers in `~/.claude/sessions/` and never reaches the
-  board. Test New session from the app UI.
-- **Never `Stop-Process -Force` a `claude.exe`.** It never disables xterm mouse reporting, so the
-  surviving shell fills with `[555;61;16M`-style garbage. Close the tab or exit properly.
-- **A shell expands `$var` in a hook command before the inner shell sees it** (that is what broke the
-  global HANDOVER hook: `$t=` became `=`).
-- **A backtick inside a JS template literal ends the literal**, and the SyntaxError points at the top
-  of the block, nowhere near the comment that caused it.
-- **An assertion can read state the action under test already changed** (a successful take-control
-  clears `unmanaged`, so reading the class afterwards always "failed"). Capture at the moment the
-  value is meant to hold.
-- **Give any sweep/cleanup function an explicit root parameter.** A test for the update-dir sweep ran
-  against the real `%TEMP%` and deleted the developer's genuinely downloaded MSIs mid-session.
-- Still true from before: `server.lock` can be hijacked by a test server (always `CMC_DRY_RUN=1` plus
-  a temp HOME); PowerShell 5.1 `-Encoding utf8` writes a BOM that `JSON.parse` rejects; an installed
-  app can serve a NEW UI with an OLD backend; never run `gh auth switch`; the Desktop is
-  OneDrive-redirected; `chrome --dump-dom` never returns on this page; use `minmax(0, 1fr)` on cards.
+- **`ELECTRON_RUN_AS_NODE` is inherited and poisons any Electron app you spawn.** Strip it
+  (`editorSpawnEnv()`), and remember `desktop/main.mjs` sets it on the server on purpose.
+- **`detached: true` is required for a handoff-style child**, not just for long-lived ones. A child
+  that must talk to another process before exiting dies with a short-lived parent.
+- **`windowsHide` and `detached` conflict on Windows** (`CREATE_NO_WINDOW` is ignored when
+  `DETACHED_PROCESS` is set), which only matters for a console-subsystem exe. Check the PE
+  subsystem byte before agonising: `Code.exe` is subsystem 2 (GUI), so it has no console either way.
+- **There is no VS Code CLI to close a window.** `code --status` lists window titles only, with
+  folder BASENAMES and no paths, and costs 2.6s.
+- **Every VS Code window shares one pid** (the Electron main process), so windows can only be told
+  apart by title, and VS Code's default title carries the folder BASENAME. Two folders called `web`
+  are indistinguishable: refuse, never guess (proved live with two real `web` windows).
+- **`WM_CLOSE` via `PostMessage` is not desktop puppeting**: it is addressed to ONE handle, needs no
+  focus and changes no focus, unlike `SendKeys`/`SetForegroundWindow`. Approved for this use on
+  2026-08-03. VS Code still runs its own save prompt, so a window that stays open is PENDING, not
+  failed.
+- **A flex `<select>` needs `min-width: 0`** or its `min-width: auto` resolves to the content width
+  and forces the row wider than its panel. Same class of bug as the `.session-card`
+  `minmax(0, 1fr)` blowout, and equally invisible to review.
+- **`git worktree remove` can half-succeed**: it deleted the contents but left the empty directory
+  behind with "Permission denied", because a VS Code window had that folder open. Close the editor,
+  then `rmdir`. The registration was already gone, so `git worktree remove` then says "not a working
+  tree" and `git worktree list` looks clean while the directory still exists.
+- **After a squash merge, `git log origin/main..<branch>` is NOT empty** and that is expected. Prove
+  parity with `git diff --stat main <branch>` before deleting the branch.
+- **`~/.config/gh-personal` can drift to the wrong active user.** Symptom: `gh pr ready` fails with
+  "przrm does not have the correct permissions" on a personal repo. Per-process fix that touches no
+  shared config: `GH_TOKEN="$(gh auth token --user patr7257)" gh <command>`.
+- Still true from before: `wt` splits on `;` even inside one quoted argument; an updater only fixes
+  FUTURE hops; a packaged app is a separate allowlist from the repo; `server.lock` can be hijacked by
+  a test server (always `CMC_DRY_RUN=1` plus a temp HOME); PowerShell 5.1 `-Encoding utf8` writes a
+  BOM that `JSON.parse` rejects; never run `gh auth switch`; `chrome --dump-dom` never returns on
+  this page.
 
 ## Open decisions waiting on Patrick
-- Should `scripts/render-check.mjs` run in CI (needs a browser step on the runner)?
+- Should the end-of-session "close VS Code" offer get a Settings toggle so it can be silenced?
+- Should `scripts/render-check.mjs` run in CI now that it covers this much (needs a browser step)?
+- Fix `~/.config/gh-personal/hosts.yml` to make `patr7257` its active user? (One line, inside that
+  config dir only.)
+- Should the `Close VS Code` button also appear for windows opened by hand, accepting the
+  basename-collision risk? Today it is deliberately scoped to windows this app opened.
 - Anything else to add to the auto-release skip list beyond `*.md`, `docs/`, `.claude/`, `.github/`?
-  `scripts/` currently DOES trigger a release.
-- Do the shortcuts need card-to-card selection (`j`/`k` or arrows plus Enter), or is Tab enough now
-  that cards are focusable?
-- Should the tab title stop being what `bringToForeground()` matches on, given Claude Code rewrites
-  it on resume? The alternative is accepting best effort for resumed tabs.
-- `VibeTraderAI` has `vibe-update-*` dirs in `%TEMP%`, so its updater looks copied from this one and
-  probably has the identical `\"` bug. Check it in its own session?
-- PatrickRobelWeb's `HANDOVER.md` is still stale (claims PR #160 awaits merge, no open PRs there).
+  `scripts/` currently DOES trigger a release, which is why this session's test-only changes shipped
+  a version.
+- Still open from before: do the shortcuts need card-to-card selection (`j`/`k` or arrows)? Should
+  the tab title stop being what `bringToForeground()` matches on? Check `VibeTraderAI` for the same
+  `\"` updater bug? PatrickRobelWeb's `HANDOVER.md` is stale.
 
 ## Environment state
-- **Everything was stopped at session close.** `node stop.mjs` removed 9 hook groups and restored the
-  original statusLine (the `statusline-command.py` one, verified by reading it back), the app was closed,
-  port 4317 is free, the lock file is gone, and zero `server.mjs` processes remain. Hooks are NOT
-  registered while the app is closed, so the board receives no live events until you launch it again
-  (launching re-adds them).
-- `main` is clean and up to date, ONE worktree (the primary checkout). All four session worktrees
-  (`-16`, `-18`, `-20`, `-22`, `-23`) removed, every branch deleted local and remote, no
-  gone-upstream branches, no open PRs, board all Done.
-- Keep-awake NOT active; power defaults intact (lid close = sleep on AC and DC).
-- No Docker (daemon not running), no cron or scheduled jobs created this session, no stray Chromium.
-- Screenshots and probe scripts went to the session scratchpad only; nothing landed in the repo.
-- `Downloads` was swept of every Mission Control MSI (779 MB freed), then
-  `Mission.Control.Center.0.1.13.msi` was re-downloaded so a manual install line stayed valid.
-  Delete it whenever you like; 0.1.13 is installed.
+- **The installed Mission Control Center 0.1.13 is STILL RUNNING** on port 4317 (pid 8552, started
+  08:42 by Patrick). It was deliberately not touched: this session started no long-lived server of
+  its own. Its hooks and statusline wrap are therefore still installed in `~/.claude/settings.json`,
+  which is normal while the app is open.
+- Every test server this session used a hermetic temp HOME and was killed; nothing of this session
+  is listening. The real `server.lock` correctly points at pid 8552 on port 4317.
+- No Docker (daemon down, and no Claude session marker, so nothing to stop). Keep-awake NOT active,
+  lid-close power defaults intact. No cron or scheduled jobs created.
+- `main` is the ONLY worktree. The `MissionControlCenter-27` worktree is removed (registration,
+  contents and the leftover empty directory), the local and remote `feat/open-in-vscode` branches
+  are deleted, no gone-upstream branches remain, no open PRs, no open issues, board all Done.
+- Exactly ONE VS Code window is open, `MW_service_tool`, which is Patrick's own and was never
+  touched. Every probe window this session created was closed again, confirmed by enumerating window
+  titles at the end.
+- Screenshots and probe scripts stayed in the session scratchpad; nothing landed in the repo.
