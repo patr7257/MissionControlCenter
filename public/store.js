@@ -190,6 +190,9 @@
   // Re-settle the title/favicon when the window regains or loses focus.
   document.addEventListener('visibilitychange', updateAttention);
 
+  var editorPromptHandler = null;
+  function onEditorPrompt(fn) { editorPromptHandler = fn; }
+
   // Handles one already-parsed message in the exact shape the SSE stream sends:
   // { type:'snapshot', firstSeenAt, agents:[...], sessions:[...] },
   // { type:'agent', agent:{...} }, or { type:'session', session:{...} }.
@@ -215,6 +218,11 @@
       updateAttention();
     } else if (msg.type === 'usage') {
       setUsage(msg.usage);
+    } else if (msg.type === 'editor-prompt') {
+      // A session ended and the server knows THIS app opened a VS Code window for
+      // its folder. Handed to whoever registered a handler (view-sessions raises
+      // the in-app confirm); nothing closes without the developer clicking.
+      if (editorPromptHandler) editorPromptHandler(msg);
     }
   }
 
@@ -269,7 +277,7 @@
     snapshot: snapshot, onTick: onTick, connect: connect, ingest: handleMessage,
     visibleAgents: visibleAgents, visibleAgentIds: visibleAgentIds,
     selectSession: selectSession, clearSession: clearSession,
-    onNav: onNav, setNavQuiet: setNavQuiet,
+    onNav: onNav, setNavQuiet: setNavQuiet, onEditorPrompt: onEditorPrompt,
     onUsage: onUsage, needsInput: needsInput, doneAwaiting: doneAwaiting, setStats: setStats,
     fmt: { dur: fmtDur, tokens: fmtTokens, esc: esc, shortId: shortId, hash: hashStr, model: fmtModel }
   };

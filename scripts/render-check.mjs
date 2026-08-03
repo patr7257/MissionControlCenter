@@ -237,6 +237,12 @@ try {
   await post('/event', { hook_event_name: 'UserPromptSubmit', session_id: SID2, cwd: CWD2, prompt: 'Summarize the CI failures from the last run' });
   await post('/event', { hook_event_name: 'Stop', session_id: SID2, cwd: CWD2 });
 
+  // Record an opened editor for SID's folder (the server runs under CMC_DRY_RUN, so
+  // nothing is really spawned). That is what makes `editorOpen` true for SID and
+  // false for SID2, which is exactly the pair needed to prove the Close VS Code
+  // button only appears for a folder this app opened.
+  await post('/open-editor', { sessionId: SID });
+
   const target = await waitFor(
     async () => (await getJson(CDP_PORT, '/json/list')).find((t) => t.type === 'page' && t.webSocketDebuggerUrl),
     'page target'
@@ -978,6 +984,130 @@ try {
   check('opening VS Code reports back in a toast', openEditor.toastShown === true && /VS Code/.test(String(openEditor.toastText)),
     String(openEditor.toastText));
 
+  // ---- Close VS Code. The button is only offered for a folder this app opened
+  // (server-derived `editorOpen`), so it can never propose closing an editor the
+  // developer opened by hand. SID's folder was opened during seeding, SID2's was
+  // not, which is the pair that proves it.
+  const closeBtns = await cdp.eval(`(function () {
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.session-card'));
+    var pick = function (needle) {
+      return cards.find(function (c) {
+        var t = c.querySelector('.sc-title');
+        return t && t.textContent.indexOf(needle) !== -1;
+      });
+    };
+    var vis = function (card) {
+      if (!card) return null;
+      var b = card.querySelector('.sc-code-close');
+      return b ? getComputedStyle(b).display !== 'none' : null;
+    };
+    return {
+      opened: vis(pick('A Deliberately')),
+      notOpened: vis(pick('awaiting-demo')),
+      label: (function () { var b = document.querySelector('.sc-code-close'); return b ? b.textContent.trim() : null; })()
+    };
+  })()`);
+  check('Close VS Code shows on a card whose folder this app opened', closeBtns.opened === true, JSON.stringify(closeBtns));
+  check('Close VS Code stays hidden on a card whose folder it did not open', closeBtns.notOpened === false, JSON.stringify(closeBtns));
+  check('the close action is labelled Close VS Code', closeBtns.label === 'Close VS Code', String(closeBtns.label));
+
+  const closeClick = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch;
+      var calls = [], focusCalls = 0;
+      window.fetch = function (url, opts) {
+        var u = String(url);
+        if (u.indexOf('/close-editor') !== -1) {
+          calls.push(opts && opts.body ? JSON.parse(opts.body) : null);
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, closed: true }); } });
+        }
+        if (u.indexOf('/focus') !== -1) {
+          focusCalls += 1;
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, mode: 'focused' }); } });
+        }
+        return originalFetch(url, opts);
+      };
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.session-card'));
+      var card = cards.find(function (c) {
+        var t = c.querySelector('.sc-title');
+        return t && t.textContent.indexOf('A Deliberately') !== -1;
+      });
+      var btn = card.querySelector('.sc-code-close');
+      btn.click();
+      btn.click();
+      setTimeout(function () {
+        var toast = document.querySelector('.toast');
+        window.fetch = originalFetch;
+        resolve({
+          calls: calls, focusCalls: focusCalls,
+          confirmOpen: getComputedStyle(document.getElementById('confirmBackdrop')).display !== 'none',
+          toastText: toast ? toast.textContent : null
+        });
+      }, 400);
+    });
+  })()`);
+  check('the Close VS Code button POSTs /close-editor once, even on a double click', closeClick.calls.length === 1, JSON.stringify(closeClick));
+  check('closing sends only a sessionId, never a client-side path',
+    !!closeClick.calls[0] && !!closeClick.calls[0].sessionId && !('repo' in closeClick.calls[0]), JSON.stringify(closeClick.calls));
+  check('the Close VS Code button does not also focus the terminal', closeClick.focusCalls === 0, JSON.stringify(closeClick));
+  check('closing needs no confirm dialog of its own', closeClick.confirmOpen === false, JSON.stringify(closeClick));
+  check('a successful close reports it in a toast', /Closed the VS Code window/.test(String(closeClick.toastText)), String(closeClick.toastText));
+
+  // ---- The end-of-session offer. Driven through the same entry point the SSE
+  // `editor-prompt` frame uses, so this exercises the real queue and the real
+  // dialog rather than a copy. Cancel must close NOTHING, and two prompts arriving
+  // together must show one at a time (the confirm is a single reused element).
+  const endPrompt = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch;
+      var calls = [];
+      window.fetch = function (url, opts) {
+        if (String(url).indexOf('/close-editor') !== -1) {
+          calls.push(opts && opts.body ? JSON.parse(opts.body) : null);
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, closed: true }); } });
+        }
+        return originalFetch(url, opts);
+      };
+      window.ViewSessions.editorPrompt({ sessionId: 'render-1', folder: 'C:/fake/one', name: 'First Session' });
+      window.ViewSessions.editorPrompt({ sessionId: 'render-2', folder: 'C:/fake/two', name: 'Second Session' });
+      var read = function () {
+        return {
+          open: getComputedStyle(document.getElementById('confirmBackdrop')).display !== 'none',
+          title: document.getElementById('confirmTitle').textContent,
+          okLabel: document.getElementById('confirmOkBtn').textContent,
+          body: document.getElementById('confirmText').textContent,
+          path: document.getElementById('confirmPath').textContent
+        };
+      };
+      var first = read();
+      // Cancel the first: it must close nothing and hand over to the queued second.
+      document.getElementById('confirmCancelBtn').click();
+      setTimeout(function () {
+        var second = read();
+        var callsAfterCancel = calls.length;
+        document.getElementById('confirmOkBtn').click();
+        setTimeout(function () {
+          var third = read();
+          window.fetch = originalFetch;
+          resolve({ first: first, second: second, third: third, callsAfterCancel: callsAfterCancel, calls: calls });
+        }, 300);
+      }, 100);
+    });
+  })()`);
+  check('a session ending offers to close its VS Code window',
+    endPrompt.first.open === true && endPrompt.first.title === 'Session ended' &&
+      endPrompt.first.okLabel === 'Close VS Code', JSON.stringify(endPrompt.first));
+  check('the offer names the session and its folder',
+    /First Session/.test(endPrompt.first.body) && endPrompt.first.path === 'C:/fake/one', JSON.stringify(endPrompt.first));
+  check('the offer explains that unsaved changes are still VS Code\'s call',
+    /unsaved/i.test(endPrompt.first.body), JSON.stringify(endPrompt.first.body));
+  check('cancelling the offer closes nothing', endPrompt.callsAfterCancel === 0, JSON.stringify(endPrompt));
+  check('a second session ending queues behind the first instead of being dropped',
+    endPrompt.second.open === true && /Second Session/.test(endPrompt.second.body), JSON.stringify(endPrompt.second));
+  check('accepting the offer POSTs /close-editor for that session',
+    endPrompt.calls.length === 1 && endPrompt.calls[0].sessionId === 'render-2', JSON.stringify(endPrompt.calls));
+  check('the dialog is gone once the queue is empty', endPrompt.third.open === false, JSON.stringify(endPrompt.third));
+
   const errs = cdp.jsErrors();
   check('no JS or console errors on the board', errs.length === 0, errs.slice(0, 5).join(' | '));
 
@@ -1031,6 +1161,19 @@ try {
     const nsPath = SHOT.replace(/(\.png)?$/i, '') + '-new-session.png';
     fs.writeFileSync(nsPath, Buffer.from(nsShot.data, 'base64'));
     process.stdout.write('screenshot: ' + nsPath + '\n');
+    // Fifth shot: the end-of-session offer to close VS Code, for the same reason as
+    // the Take Control shot: a modal that is closed again by the time the board
+    // settles cannot otherwise be looked at.
+    await cdp.eval(`(function () {
+      document.getElementById('newSessionCancelBtn').click();
+      window.ViewSessions.editorPrompt({ sessionId: 'render-1', folder: 'C:/Users/pr/repos/1-Personal/MissionControlCenter', name: 'A Deliberately Very Long Session Name To Force Ellipsis' });
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    const endShot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    const endPath = SHOT.replace(/(\.png)?$/i, '') + '-session-ended.png';
+    fs.writeFileSync(endPath, Buffer.from(endShot.data, 'base64'));
+    process.stdout.write('screenshot: ' + endPath + '\n');
   }
 
   process.stdout.write(failures === 0 ? '\nRESULT: ALL PASS\n' : `\nRESULT: ${failures} FAILED\n`);

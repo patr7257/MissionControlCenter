@@ -248,6 +248,44 @@ command-line invariant, so a folder named `a;b` opens fine even though `/launch`
 one-time workspace-trust prompt on a new folder is expected, not a bug. `ok:true` means the process
 started, never that a window appeared, hence the present-continuous UI copy.
 
+## Closing a VS Code window (`terminal.closeEditor`, `POST /close-editor`)
+A `Close VS Code` button appears on a card only while this app has a record of opening an editor for
+that session's folder, and a session ending offers the same thing through the in-app confirm. Added
+2026-08-03 with Patrick's explicit go-ahead on the mechanism, which matters because of the
+never-puppet-the-desktop rule:
+
+- **There is NO VS Code CLI for this.** `code` opens, diffs and reports status; nothing closes a
+  window. `code --status` lists window TITLES only, with folder BASENAMES and no paths, and costs
+  ~2.6s, so it does not help identify anything either.
+- **The mechanism is Win32 `PostMessage(WM_CLOSE)` to a resolved handle.** That is a message
+  addressed to ONE window, not input: it needs no focus, changes no focus, and cannot land in
+  whatever happens to be focused the way `SendKeys` can. VS Code still runs its own "save your
+  changes?" prompt, which is why a close that leaves the window standing is reported as pending
+  ("VS Code is asking about unsaved changes") rather than as success or failure.
+- **Identification can only be by title, so ambiguity is refused, never guessed.** Every VS Code
+  window belongs to the SAME pid (the Electron main process), so `Get-Process | MainWindowHandle`
+  cannot distinguish them and `EnumWindows` is required. VS Code's default title is
+  `${dirty}${activeEditorShort} - ${rootName} - ${appName}`, where `rootName` is the folder
+  BASENAME, so two open folders named `web` are indistinguishable: 2+ matches returns
+  `reason:'ambiguous'` and closes nothing (proved live with two real `web` windows). A custom
+  `window.title` setting will simply not match, which reports as `no-window`.
+- **Only windows WE opened.** `openedEditors` in `terminal.mjs` (persisted to
+  `~/.claude/agent-fleet-monitor/opened-editors.json`, pruned at 7 days, capped at 200) is the scope
+  boundary Patrick chose, so the app can never propose closing an editor he opened by hand. Unlike
+  `managedTabs` nothing here is positional, so it is safely trimmable. `serializeSession` derives
+  `editorOpen` from it on every serialize (no state to sync, survives a restart), and
+  `pushSessionsForFolder()` re-pushes every session sharing a cwd after an open or a close, because a
+  window belongs to a folder rather than to one session.
+- **A close costs about 6 seconds** (Add-Type compile plus `EnumWindows` at ~0.6s, `Get-Process` per
+  window, plus a 0.7s settle wait before asking whether the window went away). The first 8s cap was
+  too tight and reported real closes as timeouts, so it is now 25s (`CMC_CLOSE_TIMEOUT_MS`), the UI
+  toasts "Closing VS Code..." immediately, and the button's re-entrancy release is 30s so it can
+  never fire mid-flight.
+- The end-of-session offer travels as its own `{ type:'editor-prompt' }` SSE frame rather than being
+  inferred from the status change, so it fires exactly once even when the card is filtered out of
+  view. `view-sessions.js` queues the prompts (`showConfirm` reuses one dialog element, and two
+  sessions can end in the same second) via a new optional `showConfirm({ onClose })` hook.
+
 **The New session popup is wider for this** (`.pop.newsession-pop { max-width: 760px }`, a
 popup-specific cap so the confirm and Settings dialogs keep theirs). `.chain` is now `nowrap` with
 `.chain > .sel { flex: 1 1 0; min-width: 0 }`, re-wrapping only under 560px. `min-width: 0` is the

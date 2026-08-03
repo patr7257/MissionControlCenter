@@ -26,6 +26,10 @@ const OPEN_DIR = path.join(TMP_HOME, 'repos', '1-Personal', 'opener-demo');
 const OPEN_SEMI_DIR = path.join(TMP_HOME, 'repos', '1-Personal', 'semi;colon');
 const OPEN_GONE_DIR = path.join(TMP_HOME, 'repos', '1-Personal', 'deleted-repo');
 const OPEN_OUTSIDE_DIR = path.join(TMP_HOME, 'not-repos');
+// Exists, is inside the repos root, and is deliberately never opened: the fixture
+// for "close refuses a folder this app did not open".
+const OPEN_GONE_NEVER_OPENED = path.join(TMP_HOME, 'repos', '1-Personal', 'never-opened');
+fs.mkdirSync(OPEN_GONE_NEVER_OPENED, { recursive: true });
 fs.mkdirSync(OPEN_DIR, { recursive: true });
 fs.mkdirSync(OPEN_SEMI_DIR, { recursive: true });
 fs.mkdirSync(OPEN_OUTSIDE_DIR, { recursive: true });
@@ -394,6 +398,71 @@ try {
     body: JSON.stringify({}),
   })).json();
   check('POST /open-editor with neither a session nor a folder fails cleanly', openEmpty && openEmpty.ok === false);
+
+  // ---- Closing a VS Code window (POST /close-editor). Scoped to windows THIS app
+  // opened, which is the whole safety story: there is no way to identify a window
+  // except by title, so refusing anything we have no record of is what stops it
+  // closing an editor the developer opened by hand.
+  const snapAfterOpen = await readSnapshot();
+  const openedSession = snapAfterOpen && snapAfterOpen.sessions.find((s) => s.id === 'smoke-open');
+  check('a session whose folder we opened reports editorOpen, so the card shows Close VS Code',
+    !!openedSession && openedSession.editorOpen === true);
+  const otherSession = snapAfterOpen && snapAfterOpen.sessions.find((s) => s.id === 'smoke-1');
+  check('a session whose folder we never opened reports editorOpen false',
+    !!otherSession && otherSession.editorOpen === false);
+
+  const closeNotOurs = await (await fetch(`${BASE}/close-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: OPEN_GONE_NEVER_OPENED }),
+  })).json();
+  check('POST /close-editor refuses a folder this app never opened',
+    closeNotOurs && closeNotOurs.ok === false && closeNotOurs.reason === 'not-ours');
+
+  const closeBySession = await (await fetch(`${BASE}/close-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-open' }),
+  })).json();
+  check('POST /close-editor closes the window for a folder we opened',
+    closeBySession && closeBySession.ok === true && closeBySession.dryRun === true);
+  check('POST /close-editor matches the window by folder BASENAME, never a full path',
+    closeBySession && closeBySession.baseName === path.basename(OPEN_DIR) &&
+      typeof closeBySession.script === 'string' && closeBySession.script.includes(path.basename(OPEN_DIR)) &&
+      !closeBySession.script.includes(OPEN_DIR));
+  check('the close script posts WM_CLOSE (0x0010) and never sends a keystroke or steals focus',
+    closeBySession && /PostMessage\(h, 0x0010/.test(closeBySession.script) &&
+      !/SendKeys|AppActivate|SetForegroundWindow|mouse_event|SendInput/i.test(closeBySession.script));
+  check('the close script only ever targets a VS Code process',
+    closeBySession && /ProcessName/.test(closeBySession.script) && closeBySession.script.includes("'code'"));
+  check('the close script refuses rather than guessing when two windows match',
+    closeBySession && /\$hits\.Count -gt 1/.test(closeBySession.script));
+
+  const closeTwice = await (await fetch(`${BASE}/close-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-open' }),
+  })).json();
+  check('closing forgets the record, so a second close is refused as not ours',
+    closeTwice && closeTwice.ok === false && closeTwice.reason === 'not-ours');
+  const snapAfterClose = await readSnapshot();
+  const closedSession = snapAfterClose && snapAfterClose.sessions.find((s) => s.id === 'smoke-open');
+  check('editorOpen goes back to false after a close, so the button disappears',
+    !!closedSession && closedSession.editorOpen === false);
+
+  const closeEmpty = await (await fetch(`${BASE}/close-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })).json();
+  check('POST /close-editor with neither a session nor a folder fails cleanly', closeEmpty && closeEmpty.ok === false);
+  const closeOutside = await (await fetch(`${BASE}/close-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: OPEN_OUTSIDE_DIR }),
+  })).json();
+  check('POST /close-editor refuses a client path outside the repos root',
+    closeOutside && closeOutside.ok === false && closeOutside.reason === 'outside-root');
 
   // Subagent-only session: a session that never gets a top-level hook (no
   // SessionStart/UserPromptSubmit of its own) must not sit on the 'working'
