@@ -206,6 +206,12 @@
 .sc-ring > div { width: 48px; height: 48px; border-radius: 50%; background: #171d2b; display: grid; place-items: center; }
 .sc-ring b { font: 700 14px/1 var(--sans); font-variant-numeric: tabular-nums; }
 .sc-ring span { font: 600 8px/1 var(--mono); letter-spacing: 0.1em; color: var(--muted); margin-top: 3px; }
+/* Runtime ring: deliberately identical to the context ring, since the point is
+   that it reads the same way. It carries its OWN lo/mid/hi class (set in JS)
+   rather than inheriting --sev from the card the way .sc-ring does, because two
+   rings on one card cannot both take the card's severity. */
+.sc-runring { margin-right: -3px; }
+.sc-runring b { font-size: 13.5px; }
 
 .sc-prompt {
   font-size: 14px; line-height: 1.5; color: var(--dim);
@@ -240,6 +246,51 @@
    visibility, toggled in JS from isActiveSession()). */
 .sc-reopen { display: none; }
 .session-card.unmanaged.is-active .sc-reopen { display: inline-flex; }
+
+/* ---- 5 hour quota bar: the one number worth steering by, so it gets the full
+   width of the board instead of a 40px ring in the header. Sits directly above
+   the filter bar and shares the lo/mid/hi severity ramp with the rings, so the
+   whole board agrees on what "getting close" looks like. Aligned to the 22px
+   content gutter rather than bleeding edge to edge, so it lines up with the
+   filters and the cards under it. ---- */
+.qbar { padding: 16px 22px 4px; }
+.qbar-head { display: flex; align-items: baseline; gap: 26px; margin-bottom: 9px; }
+/* One stat shape AND one type size for all six pieces: label and value alike. An
+   oversized value read as a headline with fine print bolted on; hierarchy now
+   comes from weight and colour alone, which keeps the row a single calm line. */
+.qstat { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+.qstat:first-child + .qstat-r { margin-left: auto; }
+.qstat > b,
+.qstat > .qval {
+  font: 650 11.5px/1 var(--mono); letter-spacing: 0.1em; white-space: nowrap;
+}
+.qstat > b { text-transform: uppercase; letter-spacing: 0.16em; color: var(--muted); }
+.qstat > .qval { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); }
+/* Only the percentage takes the severity colour: it is the one number that should
+   pull the eye when it climbs. */
+.qbar-pct { color: var(--sev); }
+/* Below this the three stats plus the bar stop fitting side by side. */
+@media (max-width: 720px) {
+  .qbar-head { flex-wrap: wrap; gap: 8px 18px; }
+  .qstat:first-child + .qstat-r { margin-left: 0; }
+}
+.qbar-track {
+  position: relative; height: 14px; border-radius: 999px; overflow: hidden;
+  background: #131926; border: 1px solid rgba(255,255,255,0.07);
+  box-shadow: inset 0 2px 5px rgba(0,0,0,0.55);
+}
+.qbar-fill {
+  display: block; height: 100%; width: 0; border-radius: 999px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--sev) 55%, transparent), var(--sev));
+  /* Outer glow plus a top highlight: at 8px and flat it read as a hairline and
+     was easy to miss entirely, which defeats the point of promoting it. */
+  box-shadow:
+    0 0 18px color-mix(in srgb, var(--sev) 75%, transparent),
+    inset 0 1px 0 rgba(255,255,255,0.3);
+  transition: width 0.4s ease, background 0.4s ease;
+}
+/* A stale reading must look stale rather than authoritative, same rule as .m5. */
+.qbar.stale { opacity: 0.55; }
 
 /* ---- Session filter bar ---- */
 .filter-bar { display: flex; align-items: center; gap: 8px; padding: 12px 22px 0; flex-wrap: wrap; }
@@ -343,6 +394,38 @@
    MAX_SELECTORS) about 139px. Under a ~792px viewport the backdrop's own 16px
    padding already bounds the panel, so this cap is inert on a phone. ---- */
 .pop.newsession-pop { max-width: 760px; }
+/* ---- Resume session: the amber twin of the green New session button. Amber
+   because it is a "pick something back up" action rather than a fresh start, and
+   it shares .gobtn's geometry so the pair reads as one control group. ---- */
+.gobtn.resumebtn {
+  background: linear-gradient(180deg, #f2c14e, var(--working));
+  color: #2b1d02; box-shadow: 0 2px 10px rgba(224,165,46,0.28);
+}
+.gobtn.resumebtn:hover { filter: brightness(1.07); }
+.resume-count {
+  display: inline-grid; place-items: center; min-width: 17px; height: 17px; margin-left: 7px;
+  padding: 0 4px; border-radius: 999px; background: rgba(43,29,2,0.22);
+  font: 700 10.5px/1 var(--mono); vertical-align: 1px;
+}
+.pop.resume-pop { max-width: 560px; }
+.resume-list { display: grid; gap: 8px; }
+.resume-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px;
+  padding: 11px 13px; border: 1px solid var(--line); border-radius: var(--radius-md);
+  background: rgba(255,255,255,0.02);
+}
+.resume-row:hover { border-color: color-mix(in srgb, var(--working) 45%, var(--line)); }
+.resume-row .rr-name { font-size: 13.5px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resume-row .rr-meta {
+  margin-top: 3px; font: 11px/1.4 var(--mono); color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.resume-row .rr-acts { display: flex; gap: 7px; }
+.resume-empty .kbdish {
+  font: 650 12px/1 var(--mono); background: var(--panel-2); border: 1px solid var(--line);
+  border-bottom-width: 2px; border-radius: 5px; padding: 3px 6px;
+}
+
 /* ---- Settings popup: app-level preferences plus the shortcuts guide. Wider
    than the confirm because the guide is a two-column list. ---- */
 .pop.settings-pop { max-width: 560px; }
@@ -424,20 +507,42 @@
 .stats-pop .stat .n { font-size: 22px; }
 
 /* ---- Top-bar quota meters (5h / 7d), two 40px conic rings. ---- */
-.m5 { display: flex; align-items: center; gap: 12px; }
-.m5 .g { display: flex; align-items: center; gap: 8px; }
-.m5 .ring {
-  position: relative; width: 40px; height: 40px; border-radius: 50%;
-  background: conic-gradient(var(--sev) calc(var(--pct) * 1%), #202839 0); display: grid; place-items: center;
+/* The 7 day window: a bar that stretches across whatever header room is left
+   between the Resume session button and the icon buttons. `flex: 1` plus
+   `min-width: 0` is what makes it claim that gap without ever pushing
+   .hdr-actions (which owns margin-left:auto) off the row. */
+.m5 { flex: 1; min-width: 0; display: flex; align-items: center; }
+.m7 { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
+.m7 > b {
+  font: 650 9.5px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted);
+  white-space: nowrap;
 }
-.m5 .ring > i {
-  width: 30px; height: 30px; border-radius: 50%; background: #0f141f; display: grid; place-items: center;
-  font: 700 10.5px/1 var(--sans); font-style: normal; font-variant-numeric: tabular-nums; color: var(--text);
+.m7-track {
+  flex: 1; min-width: 40px; height: 9px; border-radius: 999px; overflow: hidden;
+  background: #131926; border: 1px solid rgba(255,255,255,0.06);
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);
 }
-.m5 .lb { font: 600 9.5px/1.35 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
-.m5 .lb em { display: block; font-style: normal; letter-spacing: 0.04em; text-transform: none; color: #66718a; margin-top: 3px; }
+.m7-fill {
+  display: block; height: 100%; width: 0; border-radius: 999px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--sev) 55%, transparent), var(--sev));
+  box-shadow: 0 0 10px color-mix(in srgb, var(--sev) 60%, transparent);
+  transition: width 0.4s ease, background 0.4s ease;
+}
+.m7-val, .m7-reset {
+  font: 700 11px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--dim);
+  white-space: nowrap;
+}
+.m7-val { min-width: 30px; text-align: right; }
+/* The reset moment takes room from the track (flex: 1), which is the intended
+   trade: knowing WHEN it clears matters more than 40 more pixels of bar. */
+.m7-reset { color: var(--muted); font-weight: 650; }
 /* Stale quota readings must look stale, not authoritative. */
-.m5.stale { opacity: 0.55; }
+.m5.stale, .m7.stale { opacity: 0.55; }
+/* Narrow windows: the header's buttons and icons come first, so the bar gives up
+   its space rather than forcing the row to wrap. */
+@media (max-width: 1080px) {
+  .m5 { display: none; }
+}
 
 /* ---- Toast (brief, bottom-right feedback for a card click that could not
    focus a terminal, e.g. a session the app does not manage) ---- */

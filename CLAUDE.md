@@ -297,6 +297,64 @@ two lines. `scripts/render-check.mjs` asserts the four-deep chain sits on one ro
 never overflows the panel at any width, that only this popup got the wider cap, and that the footer
 buttons stay one equal-height row.
 
+## Runtime ring, quota bars, and why `startedAt` is what it is
+Two gauges, one severity language (the shared `.lo`/`.mid`/`.hi` ramp, see the card notes below):
+- **Card runtime ring** (`paintRunRing` in `view-sessions.js`): minutes this run has been going, full
+  circle at `RUN_FULL_MIN` = 300 (the same 5 hours as the quota window, so ring and bar measure the
+  same span). Amber at 60% (180 min), red at 85% (255 min), so the warning lands BEFORE the mark
+  Patrick actually hits. Past 300 the arc stays full and the number keeps counting. It ticks on its
+  own clock (`Store.onTick`) because an idle session gets no events for minutes. **Severity is
+  computed from the UNROUNDED ratio**: rounding first made 179 min report 60% and turn amber a minute
+  early. A closed session freezes at its `lastActivityAt` instead of counting up forever. Its
+  severity class goes on the RING, not the card, because two rings cannot both inherit `--sev` from
+  one card.
+- **`startedAt` is a RUN start, and getting there took three tries.** The transcript's `mtime` (what
+  backfill used) is the LAST write, so a five-hour session read as seconds old, i.e. exactly the
+  sessions the ring exists to flag. `birthtime` is not stable either: NTFS **file tunneling** restores
+  the original creation time when a file is recreated under the same name within ~15s, so a
+  transcript being written live reports a birthtime that jumps around (measured on one file minutes
+  apart: 10:24 once, 13:22 another time). The answer is that **Claude Code publishes its own
+  `startedAt` in `~/.claude/sessions/<pid>.json`**, which `reconcileSessionRegistry()` already polls;
+  it is adopted on every tick and wins over everything else. Fallbacks, in order: a `SessionStart`
+  hook sets `nowMs()` (correct, including for a `--resume`, since a run just began), and backfill uses
+  birthtime for a session we only ever found by scanning. Asserted in `scripts/smoke-server.mjs`.
+- **The 5 hour window is a full-width bar** above the filter bar (`.qbar`), not a header ring: it is
+  the number worth steering by. Its head is three stats (`5 HOUR LIMIT` / `RESETS` / `UPDATED`) all at
+  ONE type size, labels and values alike, with hierarchy from weight and colour only; an oversized
+  value read as a headline with fine print bolted on. The reading's age is ALWAYS shown, not only once
+  stale, because a percentage with no age looks live when the feed may be minutes behind.
+- **The 7 day window is a header bar** (`.m7`) that fills the gap between the Resume session button
+  and the icon buttons via `flex: 1` plus `min-width: 0`, and reports its own reset moment with a
+  weekday prefix (`resets Sat 05:17`) since it lands days out. Hidden under 1080px so the header never
+  wraps. `render-check.mjs` asserts the geometry, not the CSS text: that is the only thing that proves
+  "fills the space it has left".
+
+## Resume later: flag a session, pick it up from the app
+For stopping a session on purpose ("back at 16:00") rather than finishing it.
+- **`scripts/flag-resume.mjs`** is the engine, run from INSIDE the session being flagged. It takes the
+  session id from `CLAUDE_CODE_SESSION_ID` and the name/cwd from Claude Code's live registry
+  (`~/.claude/sessions/<CLAUDE_PID>.json`, which is what `/rename` updates), falling back to the
+  transcript's `customTitle`. No guessing: with no id and no `--id` it fails loudly. Modes: flag (with
+  an optional free-text note), `--list`, `--unflag [id]`, `--id/--name` for another session.
+- **The skill is `skills/resume-later/SKILL.md`** in this repo, junction-linked to
+  `~/.claude/skills/resume-later` so `/resume-later` works from any repo, and it calls the script
+  through `~/.claude/skills/agent-fleet-monitor/scripts/flag-resume.mjs` (the same junction trick the
+  rest of the skill uses, so the path survives the code living under git).
+- **The contract is one file**, `~/.claude/agent-fleet-monitor/resume-flags.json`, holding
+  `{ sessionId, name, cwd, project, note, flaggedAt }`. The server reads it FRESH on every request
+  (never caches it) because another process owns the writes, so flagging shows up with no restart and
+  works whether or not the app is running.
+- **Endpoints:** `GET /resume-flags` (enriched at read time with what the live board knows, so a
+  renamed session shows its current name), `POST /resume-flagged` (reattach AND clear the flag in ONE
+  call, clearing only after `reopenSession` reports success, so a refused reattach keeps the
+  reminder), `POST /unflag-resume` (drop it without resuming). Writes return `{ ok, persisted }` and
+  the endpoints report both: they differ under `CMC_DRY_RUN`, where the removal is computed but the
+  file is untouched, so a scratch server can never delete real reminders.
+- A flag whose session has been pruned from the board is still offered, labelled "not on the board any
+  more", since reattaching needs only the id.
+- The amber **Resume session** button sits next to New session with a count badge, and polls the flag
+  file every 15s (the file is written by another process, so there is nothing to push).
+
 ## Usage feed: context window and 5h/7d quota (`statusline-feed.mjs`)
 The 5-hour and 7-day rate-limit windows and the true context-window percentage are in NO hook
 payload, in NO transcript, and there is no `claude usage` subcommand. The only local source is the
@@ -496,6 +554,13 @@ app's back/forward history and the Settings popup.
 ## Verification tooling
 - `node scripts/smoke-server.mjs` - hermetic temp HOME, boots the server, checks the endpoints, hook
   ingestion, statusline ingestion, registry reconciliation and launch command shapes. Runs in CI.
+  **It listens on port 4318, so never park an ad hoc server there**: a preview server on 4318 made the
+  suite fail with a wall of unexplained FAILs, because the smoke server could not bind and every
+  request hit the preview instead. Its stderr is INHERITED for exactly that reason (it used to be
+  `stdio: 'ignore'`, which hid the `EADDRINUSE` completely, in CI too).
+- `node scripts/check-flag-resume.mjs` - really spawns `scripts/flag-resume.mjs` against a hermetic
+  HOME and asserts the whole flag lifecycle plus its failure modes. Runs in CI. The CLI surface is the
+  contract the `/resume-later` skill depends on, so it is tested as a CLI, not by importing pieces.
 - `node scripts/check-installer-launch.mjs` - spawns the updater's real install command with a
   stand-in for msiexec and asserts the MSI path arrives unmangled. Windows only (it is Windows
   quoting under test) and SKIPS with exit 0 elsewhere, but CI runs on `windows-latest`, so it really

@@ -20,6 +20,7 @@
     <div class="nav" id="nav">
       <button data-view="sessions" class="navbtn on" id="navSessions">Sessions</button>
       <button class="gobtn" id="newSessionOpenBtn" type="button">New session</button>
+      <button class="gobtn resumebtn" id="resumeOpenBtn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="resumePopup" title="Sessions flagged for later with /resume-later">Resume session<span class="resume-count" id="resumeCount" style="display:none">0</span></button>
     </div>
     <div class="crumb" id="crumb" style="display:none">
       <button id="crumbBack">&#8592; Sessions</button>
@@ -112,6 +113,26 @@
     </div>
   </div>
 
+  <!-- Sessions flagged for later by the /resume-later skill. Reuses the .pop
+       chrome so it reads as one system with New session and the confirm; the
+       visibility lives on the BACKDROP, never on the panel. -->
+  <div class="pop-backdrop" id="resumeBackdrop" style="display:none">
+    <div class="pop resume-pop" id="resumePopup" role="dialog" aria-modal="true" aria-labelledby="resumePopupTitle">
+      <div class="pop-head"><b id="resumePopupTitle">Resume a flagged session</b><span>esc to close</span></div>
+      <div class="pop-body">
+        <div class="resume-list" id="resumeList"></div>
+        <p class="pop-text resume-empty" id="resumeEmpty" style="display:none">
+          Nothing is flagged for resume yet.
+          <span class="note">Run <b class="kbdish">/resume-later</b> inside a session you want to pick up again. It records the session so it shows here, and resuming from this list clears the flag.</span>
+        </p>
+      </div>
+      <div class="pop-foot">
+        <span class="path" id="resumePath"></span>
+        <button id="resumeCloseBtn" class="ghostbtn" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- In-app confirm. Replaces window.confirm(), whose native chrome ignores the
        app's own styling entirely (and in the Electron shell renders as a bare OS
        dialog titled "Mission Control Center"). Reuses the .pop-backdrop / .pop
@@ -132,6 +153,25 @@
   </div>
 
   <div id="viewSessions" class="view active">
+    <!-- The 5 hour quota as a full-width bar, directly above the filters. It used
+         to be a ring in the header next to the 7 day one, which made the single
+         most consequential number on screen the same size as everything else.
+         The 7 day ring stays in the header: it moves slowly and is reference, not
+         a thing to steer by. Hidden until the statusline feed reports a value. -->
+    <div class="qbar" id="quotaBar" style="display:none">
+      <!-- Three stats with identical typography rather than a headline plus fine
+           print: the reset time and the reading's age are as load-bearing as the
+           percentage. The feed only re-runs when a session renders its statusline,
+           so a percentage with no age attached reads as live when it may be
+           minutes behind, which is why the age is always shown and not only once
+           it crosses the stale threshold. -->
+      <div class="qbar-head">
+        <span class="qstat"><b>5 hour limit</b><span class="qval qbar-pct" id="quotaPct"></span></span>
+        <span class="qstat qstat-r" id="quotaResetStat"><b>resets</b><span class="qval" id="quotaNote"></span></span>
+        <span class="qstat qstat-r"><b>updated</b><span class="qval" id="quotaAge"></span></span>
+      </div>
+      <div class="qbar-track"><span class="qbar-fill" id="quotaFill"></span></div>
+    </div>
     <div class="filter-bar" id="filterBar">
       <label class="flt-label" for="fltState">Show:</label>
       <select id="fltState" class="flt-select">
