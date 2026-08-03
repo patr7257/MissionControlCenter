@@ -38,6 +38,26 @@ so it stays valid while the code lives under git.
 Report back what it printed (the session name it flagged and any note), and remind
 Patrick that resuming from the app clears the flag by itself.
 
+## Flagging a session that has already ended
+
+When Patrick pastes what Claude Code printed on exit:
+
+```
+Resume this session with:
+claude --resume "Samberg VIBE Extension"
+```
+
+use the NAME, from anywhere (it does not have to be that session):
+
+```
+node "C:/Users/pr/.claude/skills/agent-fleet-monitor/scripts/flag-resume.mjs" --find "Samberg VIBE Extension"
+```
+
+`--find` resolves the name to that session's id AND its working directory, so the
+resumed tab opens in the right folder. It refuses if the name matches nothing, and
+if it matches more than one session it lists them and stops rather than guessing:
+pick one with `--id <id> --cwd <path>`.
+
 ## The other modes
 
 ```
