@@ -182,7 +182,11 @@ const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'cmc-render-'));
 // A fake repos tree so GET /repos returns something the picker can walk, and so
 // the GitHub-account rule (anything under 2-ZRM is the work account) is
 // exercised against real folder data rather than a stub.
-fs.mkdirSync(path.join(TMP_HOME, 'repos', '2-ZRM', 'customers'), { recursive: true });
+// Four levels deep on purpose: DEFAULT_REPO_CHAIN preselects 2-ZRM/customers, so
+// three selects render on open and one more pick produces a fourth. That is the
+// case the popup-width check below measures, and the long folder name is what
+// used to force the row wider than the panel.
+fs.mkdirSync(path.join(TMP_HOME, 'repos', '2-ZRM', 'customers', 'a-very-long-customer-name', 'their-webshop-frontend'), { recursive: true });
 fs.mkdirSync(path.join(TMP_HOME, 'repos', '1-Personal', 'MissionControlCenter'), { recursive: true });
 
 const server = spawn(process.execPath, [path.join(REPO, 'server.mjs'), '--port', String(PORT)], {
@@ -233,6 +237,12 @@ try {
   await post('/event', { hook_event_name: 'UserPromptSubmit', session_id: SID2, cwd: CWD2, prompt: 'Summarize the CI failures from the last run' });
   await post('/event', { hook_event_name: 'Stop', session_id: SID2, cwd: CWD2 });
 
+  // Record an opened editor for SID's folder (the server runs under CMC_DRY_RUN, so
+  // nothing is really spawned). That is what makes `editorOpen` true for SID and
+  // false for SID2, which is exactly the pair needed to prove the Close VS Code
+  // button only appears for a folder this app opened.
+  await post('/open-editor', { sessionId: SID });
+
   const target = await waitFor(
     async () => (await getJson(CDP_PORT, '/json/list')).find((t) => t.type === 'page' && t.webSocketDebuggerUrl),
     'page target'
@@ -277,6 +287,7 @@ try {
   check('model is prettified, raw id absent', facts.bodyHasPrettyModel && !facts.bodyHasRawModel,
     'pretty=' + facts.bodyHasPrettyModel + ' raw=' + facts.bodyHasRawModel);
   check('Details action present', facts.actionLabels.indexOf('Details') !== -1, JSON.stringify(facts.actionLabels));
+  check('Open in VS Code action present', facts.actionLabels.indexOf('VS Code') !== -1, JSON.stringify(facts.actionLabels));
   check('New session button exists', facts.hasNewSessionBtn);
   check('old always-on repo bar is gone', !facts.hasRepoBar);
   check('quota meters rendered', /5/.test(facts.usageText) && /7/.test(facts.usageText), JSON.stringify(facts.usageText));
@@ -485,6 +496,125 @@ try {
   })()`);
   check('a manual account override survives a later folder change',
     override.afterChainChange === 'work', JSON.stringify(override));
+
+  // ---- Popup width: the cascading folder chain must sit on ONE row. With .chain
+  // wrapping and .pop capped at 520px, the 4th select dropped to a new line the
+  // moment a third level was picked, so deepening the chain read as the picker
+  // breaking. Only real geometry proves it, the same reason the card geometry loop
+  // above exists. Walk the chain down to its deepest level first.
+  const chainDepth = await cdp.eval(`(function () {
+    var host = document.getElementById('newSessionSelectors');
+    var first = host.children[0];
+    for (var i = 0; i < first.options.length; i++) {
+      var v = String(first.options[i].value || '');
+      if (/2-zrm$/i.test(v.replace(/[\\\\/]+$/, ''))) { first.value = first.options[i].value; break; }
+    }
+    first.dispatchEvent(new Event('change'));
+    // Keep picking the first real folder in the deepest select until the chain
+    // stops growing (a leaf folder spawns no further select).
+    for (var guard = 0; guard < 8; guard++) {
+      var last = host.children[host.children.length - 1];
+      if (!last || last.options.length < 2) break;
+      var before = host.children.length;
+      last.selectedIndex = 1;
+      last.dispatchEvent(new Event('change'));
+      if (host.children.length === before) break;
+    }
+    return host.children.length;
+  })()`);
+  check('the folder chain cascades four levels deep', chainDepth === 4, String(chainDepth));
+
+  async function chainGeometry() {
+    return cdp.eval(`(function () {
+      var host = document.getElementById('newSessionSelectors');
+      var pr = document.getElementById('newSessionPopup').getBoundingClientRect();
+      var sels = Array.prototype.slice.call(host.children).map(function (s) {
+        var r = s.getBoundingClientRect();
+        return { top: Math.round(r.top), right: Math.round(r.right), w: Math.round(r.width) };
+      });
+      var tops = sels.map(function (s) { return s.top; });
+      return {
+        count: sels.length,
+        rows: tops.filter(function (t, i) { return tops.indexOf(t) === i; }).length,
+        overflowRight: Math.max.apply(null, [0].concat(sels.map(function (s) { return Math.round(s.right - pr.right); }))),
+        narrowest: Math.min.apply(null, [9999].concat(sels.map(function (s) { return s.w; }))),
+        panelW: Math.round(pr.width), innerW: window.innerWidth,
+        pageScrollW: document.documentElement.scrollWidth
+      };
+    })()`);
+  }
+
+  for (const vw of [1400, 1000, 700, 480, 400]) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: vw, height: 900, deviceScaleFactor: 1, mobile: false });
+    await new Promise((r) => setTimeout(r, 250));
+    const g = await chainGeometry();
+    // One row is only required while the panel has room for it: under the 560px
+    // media query the chain re-wraps ON PURPOSE, and the assertion there is the
+    // weaker but still-true "nothing overflows, no page h-scroll".
+    const oneRowRequired = vw >= 700;
+    const ok = g.count === 4 && g.overflowRight <= 1 && g.pageScrollW <= g.innerW + 1 &&
+      (!oneRowRequired || (g.rows === 1 && g.narrowest >= 60));
+    check(`popup ${vw}px: folder chain ${oneRowRequired ? 'on one row, ' : ''}nothing overflowing the panel`, ok, JSON.stringify(g));
+  }
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await new Promise((r) => setTimeout(r, 250));
+
+  // Only the New session popup may get the wider cap: the base .pop rule also
+  // feeds the confirm and the Settings dialog, so widening it would widen those.
+  // max-width resolves even on a panel whose backdrop is display:none.
+  const caps = await cdp.eval(`(function () {
+    var mw = function (id) { var e = document.getElementById(id); return e ? getComputedStyle(e).maxWidth : null; };
+    return { newSession: mw('newSessionPopup'), confirm: mw('confirmPopup'), settings: mw('settingsPopup') };
+  })()`);
+  check('only the New session popup got the wider cap',
+    caps.newSession === '760px' && caps.confirm === '430px' && caps.settings === '560px', JSON.stringify(caps));
+
+  // The footer's .path eats every spare pixel, so a two-word button label broke
+  // onto a second line and made that button taller than its neighbours. Compare
+  // real heights and tops rather than trusting the CSS text.
+  const footBtns = await cdp.eval(`(function () {
+    var r = function (id) { var b = document.getElementById(id).getBoundingClientRect(); return { top: Math.round(b.top), h: Math.round(b.height) }; };
+    return { code: r('newSessionCodeBtn'), cancel: r('newSessionCancelBtn'), launch: r('newSessionBtn') };
+  })()`);
+  check('the popup footer buttons are one row of equal-height, unwrapped labels',
+    Math.abs(footBtns.code.h - footBtns.cancel.h) <= 1 && footBtns.code.top === footBtns.cancel.top &&
+      footBtns.cancel.top === footBtns.launch.top, JSON.stringify(footBtns));
+
+  // The popup's own VS Code button opens the DEEPEST selected folder and leaves
+  // the popup open (looking at a repo, then launching a session in it, is one
+  // flow). It reports into #newSessionFeedback rather than a toast, because
+  // .toast is z-index 50 and .pop-backdrop is 100, so a toast raised from inside
+  // the modal would render behind it.
+  const popupCode = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch, calls = [];
+      window.fetch = function (url, opts) {
+        if (String(url).indexOf('/open-editor') !== -1) {
+          calls.push(opts && opts.body ? JSON.parse(opts.body) : null);
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, dryRun: true }); } });
+        }
+        return originalFetch(url, opts);
+      };
+      // #newSessionPath is written from currentLaunchPath(), so matching it proves
+      // the deepest selection was sent and not the repos root.
+      var expected = document.getElementById('newSessionPath').textContent;
+      document.getElementById('newSessionCodeBtn').click();
+      setTimeout(function () {
+        window.fetch = originalFetch;
+        resolve({
+          calls: calls, expected: expected,
+          feedback: document.getElementById('newSessionFeedback').textContent,
+          stillOpen: getComputedStyle(document.getElementById('newSessionBackdrop')).display !== 'none'
+        });
+      }, 400);
+    });
+  })()`);
+  check('the popup VS Code button POSTs the currently selected folder',
+    popupCode.calls.length === 1 && !!popupCode.calls[0] && popupCode.calls[0].repo === popupCode.expected,
+    JSON.stringify(popupCode));
+  check('opening VS Code from the popup leaves the popup open', popupCode.stillOpen === true, JSON.stringify(popupCode));
+  check('the popup reports in its own feedback line, not a toast behind the modal',
+    /VS Code/.test(String(popupCode.feedback)), String(popupCode.feedback));
 
   const closed = await cdp.eval(`(function () {
     var bd = document.getElementById('newSessionBackdrop');
@@ -808,6 +938,176 @@ try {
     JSON.stringify(cardKeys));
   check('Enter on a focused card jumps to its terminal', cardKeys.focusCalls === 1, JSON.stringify(cardKeys));
 
+  // ---- Open in VS Code from a card. A one-click action with NO confirm (unlike
+  // Take Control, which risks a duplicate tab): it creates nothing and is undone
+  // by closing the window. It must also not double as a card click, i.e. it must
+  // not focus the terminal too, which is what ev.stopPropagation() is for. Runs
+  // after the takeControl block, so #confirmBackdrop is known to be closed and the
+  // no-confirm assertion means something.
+  const openEditor = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch;
+      var calls = [], focusCalls = 0;
+      window.fetch = function (url, opts) {
+        var u = String(url);
+        if (u.indexOf('/open-editor') !== -1) {
+          calls.push(opts && opts.body ? JSON.parse(opts.body) : null);
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, dryRun: true }); } });
+        }
+        if (u.indexOf('/focus') !== -1) {
+          focusCalls += 1;
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, mode: 'focused' }); } });
+        }
+        return originalFetch(url, opts);
+      };
+      var card = document.querySelector('.session-card');
+      var btn = card.querySelector('.sc-code');
+      btn.click();
+      btn.click(); // a second, immediate click must not fire a second request
+      setTimeout(function () {
+        var toast = document.querySelector('.toast');
+        window.fetch = originalFetch;
+        resolve({
+          calls: calls, focusCalls: focusCalls,
+          confirmOpen: getComputedStyle(document.getElementById('confirmBackdrop')).display !== 'none',
+          toastText: toast ? toast.textContent : null,
+          toastShown: !!toast && toast.classList.contains('show')
+        });
+      }, 400);
+    });
+  })()`);
+  check('the card VS Code button POSTs /open-editor once, even on a double click', openEditor.calls.length === 1, JSON.stringify(openEditor));
+  check('the card sends only a sessionId, never a client-side path',
+    !!openEditor.calls[0] && !!openEditor.calls[0].sessionId && !('repo' in openEditor.calls[0]), JSON.stringify(openEditor.calls));
+  check('the VS Code button does not also focus the terminal (stopPropagation)', openEditor.focusCalls === 0, JSON.stringify(openEditor));
+  check('opening VS Code needs no confirm dialog', openEditor.confirmOpen === false, JSON.stringify(openEditor));
+  check('opening VS Code reports back in a toast', openEditor.toastShown === true && /VS Code/.test(String(openEditor.toastText)),
+    String(openEditor.toastText));
+
+  // ---- Close VS Code. The button is only offered for a folder this app opened
+  // (server-derived `editorOpen`), so it can never propose closing an editor the
+  // developer opened by hand. SID's folder was opened during seeding, SID2's was
+  // not, which is the pair that proves it.
+  const closeBtns = await cdp.eval(`(function () {
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.session-card'));
+    var pick = function (needle) {
+      return cards.find(function (c) {
+        var t = c.querySelector('.sc-title');
+        return t && t.textContent.indexOf(needle) !== -1;
+      });
+    };
+    var vis = function (card) {
+      if (!card) return null;
+      var b = card.querySelector('.sc-code-close');
+      return b ? getComputedStyle(b).display !== 'none' : null;
+    };
+    return {
+      opened: vis(pick('A Deliberately')),
+      notOpened: vis(pick('awaiting-demo')),
+      label: (function () { var b = document.querySelector('.sc-code-close'); return b ? b.textContent.trim() : null; })()
+    };
+  })()`);
+  check('Close VS Code shows on a card whose folder this app opened', closeBtns.opened === true, JSON.stringify(closeBtns));
+  check('Close VS Code stays hidden on a card whose folder it did not open', closeBtns.notOpened === false, JSON.stringify(closeBtns));
+  check('the close action is labelled Close VS Code', closeBtns.label === 'Close VS Code', String(closeBtns.label));
+
+  const closeClick = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch;
+      var calls = [], focusCalls = 0;
+      window.fetch = function (url, opts) {
+        var u = String(url);
+        if (u.indexOf('/close-editor') !== -1) {
+          calls.push(opts && opts.body ? JSON.parse(opts.body) : null);
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, closed: true }); } });
+        }
+        if (u.indexOf('/focus') !== -1) {
+          focusCalls += 1;
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, mode: 'focused' }); } });
+        }
+        return originalFetch(url, opts);
+      };
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.session-card'));
+      var card = cards.find(function (c) {
+        var t = c.querySelector('.sc-title');
+        return t && t.textContent.indexOf('A Deliberately') !== -1;
+      });
+      var btn = card.querySelector('.sc-code-close');
+      btn.click();
+      btn.click();
+      setTimeout(function () {
+        var toast = document.querySelector('.toast');
+        window.fetch = originalFetch;
+        resolve({
+          calls: calls, focusCalls: focusCalls,
+          confirmOpen: getComputedStyle(document.getElementById('confirmBackdrop')).display !== 'none',
+          toastText: toast ? toast.textContent : null
+        });
+      }, 400);
+    });
+  })()`);
+  check('the Close VS Code button POSTs /close-editor once, even on a double click', closeClick.calls.length === 1, JSON.stringify(closeClick));
+  check('closing sends only a sessionId, never a client-side path',
+    !!closeClick.calls[0] && !!closeClick.calls[0].sessionId && !('repo' in closeClick.calls[0]), JSON.stringify(closeClick.calls));
+  check('the Close VS Code button does not also focus the terminal', closeClick.focusCalls === 0, JSON.stringify(closeClick));
+  check('closing needs no confirm dialog of its own', closeClick.confirmOpen === false, JSON.stringify(closeClick));
+  check('a successful close reports it in a toast', /Closed the VS Code window/.test(String(closeClick.toastText)), String(closeClick.toastText));
+
+  // ---- The end-of-session offer. Driven through the same entry point the SSE
+  // `editor-prompt` frame uses, so this exercises the real queue and the real
+  // dialog rather than a copy. Cancel must close NOTHING, and two prompts arriving
+  // together must show one at a time (the confirm is a single reused element).
+  const endPrompt = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch;
+      var calls = [];
+      window.fetch = function (url, opts) {
+        if (String(url).indexOf('/close-editor') !== -1) {
+          calls.push(opts && opts.body ? JSON.parse(opts.body) : null);
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, closed: true }); } });
+        }
+        return originalFetch(url, opts);
+      };
+      window.ViewSessions.editorPrompt({ sessionId: 'render-1', folder: 'C:/fake/one', name: 'First Session' });
+      window.ViewSessions.editorPrompt({ sessionId: 'render-2', folder: 'C:/fake/two', name: 'Second Session' });
+      var read = function () {
+        return {
+          open: getComputedStyle(document.getElementById('confirmBackdrop')).display !== 'none',
+          title: document.getElementById('confirmTitle').textContent,
+          okLabel: document.getElementById('confirmOkBtn').textContent,
+          body: document.getElementById('confirmText').textContent,
+          path: document.getElementById('confirmPath').textContent
+        };
+      };
+      var first = read();
+      // Cancel the first: it must close nothing and hand over to the queued second.
+      document.getElementById('confirmCancelBtn').click();
+      setTimeout(function () {
+        var second = read();
+        var callsAfterCancel = calls.length;
+        document.getElementById('confirmOkBtn').click();
+        setTimeout(function () {
+          var third = read();
+          window.fetch = originalFetch;
+          resolve({ first: first, second: second, third: third, callsAfterCancel: callsAfterCancel, calls: calls });
+        }, 300);
+      }, 100);
+    });
+  })()`);
+  check('a session ending offers to close its VS Code window',
+    endPrompt.first.open === true && endPrompt.first.title === 'Session ended' &&
+      endPrompt.first.okLabel === 'Close VS Code', JSON.stringify(endPrompt.first));
+  check('the offer names the session and its folder',
+    /First Session/.test(endPrompt.first.body) && endPrompt.first.path === 'C:/fake/one', JSON.stringify(endPrompt.first));
+  check('the offer explains that unsaved changes are still VS Code\'s call',
+    /unsaved/i.test(endPrompt.first.body), JSON.stringify(endPrompt.first.body));
+  check('cancelling the offer closes nothing', endPrompt.callsAfterCancel === 0, JSON.stringify(endPrompt));
+  check('a second session ending queues behind the first instead of being dropped',
+    endPrompt.second.open === true && /Second Session/.test(endPrompt.second.body), JSON.stringify(endPrompt.second));
+  check('accepting the offer POSTs /close-editor for that session',
+    endPrompt.calls.length === 1 && endPrompt.calls[0].sessionId === 'render-2', JSON.stringify(endPrompt.calls));
+  check('the dialog is gone once the queue is empty', endPrompt.third.open === false, JSON.stringify(endPrompt.third));
+
   const errs = cdp.jsErrors();
   check('no JS or console errors on the board', errs.length === 0, errs.slice(0, 5).join(' | '));
 
@@ -839,6 +1139,41 @@ try {
     const setPath = SHOT.replace(/(\.png)?$/i, '') + '-settings.png';
     fs.writeFileSync(setPath, Buffer.from(setShot.data, 'base64'));
     process.stdout.write('screenshot: ' + setPath + '\n');
+    // Fourth shot: the New session popup with the folder chain cascaded as deep as
+    // it goes. The one-row-chain fix is asserted by geometry above, but it is also
+    // the change a human should actually look at.
+    await cdp.eval(`(function () {
+      document.getElementById('settingsCloseBtn').click();
+      window.ViewSessions.openNewSession();
+      var host = document.getElementById('newSessionSelectors');
+      for (var guard = 0; guard < 8; guard++) {
+        var last = host.children[host.children.length - 1];
+        if (!last || last.options.length < 2) break;
+        var before = host.children.length;
+        last.selectedIndex = 1;
+        last.dispatchEvent(new Event('change'));
+        if (host.children.length === before) break;
+      }
+      return host.children.length;
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    const nsShot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    const nsPath = SHOT.replace(/(\.png)?$/i, '') + '-new-session.png';
+    fs.writeFileSync(nsPath, Buffer.from(nsShot.data, 'base64'));
+    process.stdout.write('screenshot: ' + nsPath + '\n');
+    // Fifth shot: the end-of-session offer to close VS Code, for the same reason as
+    // the Take Control shot: a modal that is closed again by the time the board
+    // settles cannot otherwise be looked at.
+    await cdp.eval(`(function () {
+      document.getElementById('newSessionCancelBtn').click();
+      window.ViewSessions.editorPrompt({ sessionId: 'render-1', folder: 'C:/Users/pr/repos/1-Personal/MissionControlCenter', name: 'A Deliberately Very Long Session Name To Force Ellipsis' });
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    const endShot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    const endPath = SHOT.replace(/(\.png)?$/i, '') + '-session-ended.png';
+    fs.writeFileSync(endPath, Buffer.from(endShot.data, 'base64'));
+    process.stdout.write('screenshot: ' + endPath + '\n');
   }
 
   process.stdout.write(failures === 0 ? '\nRESULT: ALL PASS\n' : `\nRESULT: ${failures} FAILED\n`);

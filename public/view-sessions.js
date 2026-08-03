@@ -276,6 +276,8 @@
         '</span>' +
         '<span class="sc-acts">' +
           '<button type="button" class="sc-details">Details</button>' +
+          '<button type="button" class="sc-code" title="Open this folder in VS Code">VS Code</button>' +
+          '<button type="button" class="sc-code-close" title="Close the VS Code window for this folder" style="display:none">Close VS Code</button>' +
           '<button type="button" class="sc-resume prim" style="display:none">Resume</button>' +
           '<button type="button" class="sc-reopen">Take Control</button>' +
         '</span>' +
@@ -294,10 +296,12 @@
       model: el.querySelector('.sc-model'),
       badge: el.querySelector('.sc-badge'),
       details: el.querySelector('.sc-details'),
+      code: el.querySelector('.sc-code'),
+      codeClose: el.querySelector('.sc-code-close'),
       resume: el.querySelector('.sc-resume'),
       reopen: el.querySelector('.sc-reopen'),
       _status: null, _isActive: null, _title: null, _where: null, _prompt: null,
-      _model: null, _badge: null, _ctxPct: undefined, _ctxSev: null, _closed: null,
+      _model: null, _badge: null, _ctxPct: undefined, _ctxSev: null, _closed: null, _editorOpen: null,
       _id: s.id
     };
     el.addEventListener('click', function () { focusCard(c); });
@@ -313,6 +317,14 @@
     c.details.addEventListener('click', function (ev) {
       ev.stopPropagation();
       Store.selectSession(c._id);
+    });
+    c.code.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      openCardInEditor(c);
+    });
+    c.codeClose.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      closeCardEditor(c);
     });
     c.resume.addEventListener('click', function (ev) {
       ev.stopPropagation();
@@ -392,6 +404,133 @@
   }
   function resumeCard(c) { doReopen(c); }
 
+  // Open this session's folder in VS Code. Deliberately NOT behind a confirm the
+  // way Take Control is: opening an editor creates nothing, mutates nothing, is
+  // undone with Ctrl+W, and is idempotent (VS Code forwards the folder to a
+  // running instance and focuses it), so a second click is harmless. Only the
+  // sessionId is sent: the server resolves the cwd itself, as with /focus.
+  function openCardInEditor(c) {
+    if (c.code.disabled) return; // a disabled button dispatches no click, so this
+    c.code.disabled = true;      // is belt and braces against a double fire
+    // Release on a timer as well, so a promise that never settles cannot leave
+    // the affordance permanently dead.
+    var released = false;
+    var release = function () {
+      if (released) return;
+      released = true;
+      c.code.disabled = false;
+    };
+    var settle = setTimeout(release, 1500);
+    return fetch('/open-editor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: c._id })
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (!data || data.ok === false) {
+        // The server names the real reason (no VS Code found, folder gone); a
+        // generic line only when there is nothing to quote.
+        showToast((data && data.error) ? String(data.error) : 'Could not open VS Code.');
+      } else {
+        // Present continuous on purpose: we started a detached GUI process and
+        // never learn whether a window appeared, so "Opened" would overclaim.
+        showToast('Opening ' + (c._title || 'that folder') + ' in VS Code.');
+      }
+    }).catch(function () {
+      showToast('Could not reach the server to open VS Code.');
+    }).then(function () {
+      clearTimeout(settle);
+      release();
+    });
+  }
+
+  // Close the VS Code window for this session's folder. No confirm, for the same
+  // reason opening has none: nothing is destroyed, and VS Code raises its own
+  // "save your changes?" prompt for anything unsaved. The server refuses unless
+  // this app opened that window, so the button is only ever shown when it can act.
+  function closeCardEditor(c) {
+    if (c.codeClose.disabled) return;
+    c.codeClose.disabled = true;
+    var released = false;
+    var release = function () {
+      if (released) return;
+      released = true;
+      c.codeClose.disabled = false;
+    };
+    // Well above the server's own cap on the window query (measured at about 6s
+    // for a real close, capped at 25s), so this fallback can only ever fire when
+    // the promise is genuinely lost, never while a request is still in flight.
+    var settle = setTimeout(release, 30000);
+    return postCloseEditor({ sessionId: c._id }, c._title).then(function () {
+      clearTimeout(settle);
+      release();
+    });
+  }
+
+  // Shared by the card button and the end-of-session prompt, so both report the
+  // same three outcomes in the same words.
+  function postCloseEditor(body, name) {
+    // Closing takes a few seconds (the server enumerates windows, then waits to see
+    // whether the window really went away), so say something immediately rather
+    // than leaving a dead-looking button.
+    showToast('Closing VS Code...');
+    return fetch('/close-editor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (!data || data.ok === false) {
+        // The server explains itself: not ours, no window left, or two windows
+        // showing the same folder name and so refusing to guess.
+        showToast((data && data.error) ? String(data.error) : 'Could not close VS Code.');
+      } else if (data.closed) {
+        showToast('Closed the VS Code window for ' + (name || 'that folder') + '.');
+      } else {
+        // WM_CLOSE was delivered but the window is still there, which in practice
+        // means VS Code is asking about unsaved files. Say so rather than claiming
+        // a close that has not happened.
+        showToast('VS Code is asking about unsaved changes before it closes.');
+      }
+    }).catch(function () {
+      showToast('Could not reach the server to close VS Code.');
+    });
+  }
+
+  // ---- End-of-session offer. The server sends one `editor-prompt` frame when a
+  // session ends and it knows this app opened a VS Code window for that session's
+  // folder. Queued, because two sessions can end within the same second and the
+  // confirm dialog is a single reused element. ----
+  var editorPromptQueue = [];
+  var editorPromptOpen = false;
+  function queueEditorPrompt(msg) {
+    if (!msg || !msg.sessionId) return;
+    // Never stack duplicates for one session (a SessionEnd can arrive twice).
+    var already = editorPromptQueue.some(function (m) { return m.sessionId === msg.sessionId; });
+    if (already) return;
+    editorPromptQueue.push(msg);
+    showNextEditorPrompt();
+  }
+  function showNextEditorPrompt() {
+    if (editorPromptOpen) return;
+    var msg = editorPromptQueue.shift();
+    if (!msg) return;
+    editorPromptOpen = true;
+    var done = function () {
+      editorPromptOpen = false;
+      showNextEditorPrompt();
+    };
+    showConfirm({
+      title: 'Session ended',
+      html: '<b></b> has ended. Close the VS Code window Mission Control opened for it?' +
+        '<span class="note">VS Code will still ask about anything unsaved. Cancel leaves the window open.</span>',
+      name: msg.name || 'That session',
+      path: msg.folder || '',
+      confirmLabel: 'Close VS Code',
+      onClose: done
+    }, function () {
+      postCloseEditor({ sessionId: msg.sessionId }, msg.name);
+    });
+  }
+
   // ---- In-app confirm (markup in index.html). window.confirm() cannot be
   // styled at all, and in the Electron shell it renders as a bare OS dialog
   // titled "Mission Control Center", which reads like a system error rather than
@@ -406,8 +545,16 @@
     var pathEl = document.getElementById('confirmPath');
     var okBtn = document.getElementById('confirmOkBtn');
     // No dialog in the DOM (an embedded/older shell): do the thing rather than
-    // silently dropping the action.
-    if (!backdrop || !textEl || !okBtn) { onConfirm(); return; }
+    // silently dropping the action. `opts.onClose`, when given, runs once the
+    // dialog is finished either way (confirmed or cancelled).
+    // No dialog in the DOM: run the action, but still tell the caller the "dialog"
+    // is finished, or a queued prompt would wait forever on a dialog that never
+    // opened.
+    if (!backdrop || !textEl || !okBtn) {
+      onConfirm();
+      if (opts.onClose) opts.onClose();
+      return;
+    }
     if (titleEl) titleEl.textContent = opts.title || 'Confirm';
     textEl.innerHTML = opts.html || '';
     // The session name is the one untrusted string here, so it is written as
@@ -416,7 +563,7 @@
     if (nameSlot) nameSlot.textContent = opts.name || '';
     if (pathEl) pathEl.textContent = opts.path || '';
     okBtn.textContent = opts.confirmLabel || 'Confirm';
-    confirmState = { onConfirm: onConfirm, opener: opts.opener || null };
+    confirmState = { onConfirm: onConfirm, opener: opts.opener || null, onClose: opts.onClose || null };
     backdrop.style.display = 'flex';
     okBtn.focus();
     document.addEventListener('keydown', onConfirmKeydown);
@@ -426,8 +573,10 @@
     if (backdrop) backdrop.style.display = 'none';
     document.removeEventListener('keydown', onConfirmKeydown);
     var opener = confirmState && confirmState.opener;
+    var onClose = confirmState && confirmState.onClose;
     confirmState = null;
     if (opener && opener.offsetParent !== null) opener.focus();
+    if (onClose) onClose();
   }
   function onConfirmKeydown(e) {
     if (e.key === 'Escape') { e.preventDefault(); closeConfirm(); }
@@ -536,12 +685,20 @@
       }
       c._ctxPct = ctxPct;
     }
-    // Actions: Details always, Resume when closed, Reopen (CSS-driven via
-    // .unmanaged.is-active) only while active and unmanaged.
+    // Actions: Details and VS Code always, Resume when closed, Reopen (CSS-driven
+    // via .unmanaged.is-active) only while active and unmanaged, Close VS Code only
+    // while this app has a record of opening an editor for this folder (the server
+    // derives `editorOpen` from that record, so the button is never offered when the
+    // server would refuse it).
     var closed = !isActive;
     if (c._closed !== closed) {
       c.resume.style.display = closed ? '' : 'none';
       c._closed = closed;
+    }
+    var editorOpen = !!s.editorOpen;
+    if (c._editorOpen !== editorOpen) {
+      c.codeClose.style.display = editorOpen ? '' : 'none';
+      c._editorOpen = editorOpen;
     }
     c.time.textContent = fmtRelative(s.lastActivityAt);
     c.el.setAttribute('data-last-activity', s.lastActivityAt || '');
@@ -810,6 +967,43 @@
     });
   }
 
+  // Open the folder the dropdowns currently point at in VS Code, without
+  // launching a session. The popup deliberately stays open and the Name field is
+  // not cleared: looking at a repo and then starting a session in it is the
+  // natural sequence.
+  //
+  // Feedback goes into #newSessionFeedback, NOT showToast: .toast is z-index 50
+  // while .pop-backdrop is 100 (with a blurred translucent background), so a
+  // toast raised from inside the modal would render behind it.
+  function openLaunchPathInEditor() {
+    var btn = document.getElementById('newSessionCodeBtn');
+    var feedback = document.getElementById('newSessionFeedback');
+    var repoPath = currentLaunchPath();
+    if (!repoPath) {
+      if (feedback) feedback.textContent = 'Pick a folder first.';
+      return;
+    }
+    var label = baseName(repoPath);
+    if (btn) btn.disabled = true;
+    if (feedback) feedback.textContent = 'Opening ' + label + ' in VS Code...';
+    fetch('/open-editor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: repoPath })
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (feedback) {
+        feedback.textContent = (data && data.ok === false)
+          ? (data.error ? String(data.error) : 'Could not open VS Code.')
+          : 'Opening ' + label + ' in VS Code';
+      }
+    }).catch(function () {
+      if (feedback) feedback.textContent = 'Could not open VS Code.';
+    }).then(function () {
+      if (btn) btn.disabled = false;
+      setTimeout(function () { if (feedback) feedback.textContent = ''; }, 2500);
+    });
+  }
+
   // ---- New session popup chrome (Esc closes, backdrop click closes, focus
   // moves to Name on open and back to the opener button on close). The popup
   // markup lives outside #viewSessions in index.html (a fixed backdrop), so
@@ -851,6 +1045,8 @@
     }
     var accSel = document.getElementById('newSessionAccount');
     if (accSel) accSel.addEventListener('change', function () { accountManualOverride = true; });
+    var codeBtn = document.getElementById('newSessionCodeBtn');
+    if (codeBtn) codeBtn.addEventListener('click', openLaunchPathInEditor);
     var cancelBtn = document.getElementById('newSessionCancelBtn');
     if (cancelBtn) cancelBtn.addEventListener('click', closeNewSessionPopup);
     var backdrop = document.getElementById('newSessionBackdrop');
@@ -942,6 +1138,9 @@
   Store.onUsage(updateUsageMeters);
   initNewSessionPopup();
   initConfirmPopup();
+  // Registered once at load, not in activate(): a session can end while the detail
+  // view is on screen, and the offer must still reach the developer.
+  Store.onEditorPrompt(queueEditorPrompt);
 
   window.ViewSessions = {
     id: 'sessions',
@@ -956,6 +1155,9 @@
     update: function () {},
     sessionsChanged: function () { if (Store.getActiveId() === 'sessions') { populateRepoFilter(); syncAll(); } },
     setStateFilter: setStateFilter,
-    openNewSession: openNewSessionPopup
+    openNewSession: openNewSessionPopup,
+    // Exposed for scripts/render-check.mjs, which drives the end-of-session offer
+    // without needing a real session to end.
+    editorPrompt: queueEditorPrompt
   };
 })();

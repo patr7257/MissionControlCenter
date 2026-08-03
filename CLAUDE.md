@@ -206,6 +206,97 @@ Landed 2026-07-19 (PRs #3, #4, #6, #8):
   capped at 5 levels / 4000 nodes), and the New session bar renders one dropdown per level, each
   defaulting to "Not selected", launching in the deepest folder actually selected (or the root).
 
+## Open in VS Code (`terminal.openInVsCode`, `POST /open-editor`)
+Two buttons, one action: a `VS Code` button in every session card footer (opens that session's `cwd`)
+and one in the New session popup footer (opens the folder the cascading dropdowns point at, without
+launching a session). `POST /open-editor` accepts `{ sessionId }` (the card; the cwd is resolved
+SERVER side from the sessions map, as `/focus` and `/reopen` do) or `{ repo }` (the popup, i.e. a
+client-supplied path, so it is bounded by `terminal.isInsideReposRoot()`); `sessionId` wins when both
+are present. No confirm dialog, unlike Take Control: opening an editor creates nothing, is undone
+with Ctrl+W, and is idempotent, since VS Code forwards the folder to a running instance and focuses
+it. Failures come back as `{ ok:false, reason:'no-editor'|'bad-folder'|'outside-root'|'spawn-failed',
+error }` and the UI prints `error` verbatim.
+
+Four load-bearing details, three of them found only by really spawning it:
+- **Never route this through `wt`.** A tab that ran `code .` and closed itself would shift every
+  LATER tab down one while `managedTabs` kept its old positional `tabIndex`, so every later focus
+  click would jump to the wrong tab. `scripts/smoke-server.mjs` asserts the command contains no `wt`,
+  no `cmd /c`, no `powershell`, and that a call adds no `managedTabs` entry.
+- **`ELECTRON_RUN_AS_NODE` must never reach `Code.exe`.** VS Code is an Electron app, so with that
+  variable set it runs as a bare Node interpreter, tries to `require` the folder path and exits 1
+  with nothing visible (stdio is ignored): the button silently does nothing. `desktop/main.mjs`
+  spawns `server.mjs` with exactly that variable, so EVERY packaged install would have hit it (a
+  Claude Code session's own env has it too, which is how it was caught). `editorSpawnEnv()` strips it
+  and is exported purely so the smoke test can assert that, the same reason `installerSpawnArgs()`
+  exists.
+- **`detached: true` plus `unref()`.** A second `Code.exe` does not draw the window itself: it
+  connects to the already-running instance over a named pipe, forwards the folder and exits. Being
+  killed mid-handoff means nothing happens at all, which is exactly what a non-detached spawn from a
+  short-lived parent produced (measured: no window; detached opened it). Windows ignores
+  `CREATE_NO_WINDOW` (`windowsHide`) when `DETACHED_PROCESS` is set, which does not matter here
+  because `Code.exe` is a GUI-subsystem binary (PE subsystem 2, verified) and has no console either
+  way.
+- **Spawn `Code.exe`, never `code.cmd`.** Node refuses to spawn a `.cmd` without `shell: true`, and
+  that shell is both a console flash and a quoting hazard. Resolution order: `CMC_VSCODE_EXE`
+  (reported as an error when it points at nothing, never silently ignored), then `where code` mapped
+  from `bin/code.cmd` to the `Code.exe` one level up, then static install paths. A positive result is
+  cached for the process lifetime, a miss for 30s only.
+
+Note `firstSemicolonArg()` deliberately does NOT apply here (the semicolon rule is a `wt`
+command-line invariant, so a folder named `a;b` opens fine even though `/launch` must refuse it), and
+`normalizePath()` output must never be spawned (it lowercases; it is a comparison key). VS Code's
+one-time workspace-trust prompt on a new folder is expected, not a bug. `ok:true` means the process
+started, never that a window appeared, hence the present-continuous UI copy.
+
+## Closing a VS Code window (`terminal.closeEditor`, `POST /close-editor`)
+A `Close VS Code` button appears on a card only while this app has a record of opening an editor for
+that session's folder, and a session ending offers the same thing through the in-app confirm. Added
+2026-08-03 with Patrick's explicit go-ahead on the mechanism, which matters because of the
+never-puppet-the-desktop rule:
+
+- **There is NO VS Code CLI for this.** `code` opens, diffs and reports status; nothing closes a
+  window. `code --status` lists window TITLES only, with folder BASENAMES and no paths, and costs
+  ~2.6s, so it does not help identify anything either.
+- **The mechanism is Win32 `PostMessage(WM_CLOSE)` to a resolved handle.** That is a message
+  addressed to ONE window, not input: it needs no focus, changes no focus, and cannot land in
+  whatever happens to be focused the way `SendKeys` can. VS Code still runs its own "save your
+  changes?" prompt, which is why a close that leaves the window standing is reported as pending
+  ("VS Code is asking about unsaved changes") rather than as success or failure.
+- **Identification can only be by title, so ambiguity is refused, never guessed.** Every VS Code
+  window belongs to the SAME pid (the Electron main process), so `Get-Process | MainWindowHandle`
+  cannot distinguish them and `EnumWindows` is required. VS Code's default title is
+  `${dirty}${activeEditorShort} - ${rootName} - ${appName}`, where `rootName` is the folder
+  BASENAME, so two open folders named `web` are indistinguishable: 2+ matches returns
+  `reason:'ambiguous'` and closes nothing (proved live with two real `web` windows). A custom
+  `window.title` setting will simply not match, which reports as `no-window`.
+- **Only windows WE opened.** `openedEditors` in `terminal.mjs` (persisted to
+  `~/.claude/agent-fleet-monitor/opened-editors.json`, pruned at 7 days, capped at 200) is the scope
+  boundary Patrick chose, so the app can never propose closing an editor he opened by hand. Unlike
+  `managedTabs` nothing here is positional, so it is safely trimmable. `serializeSession` derives
+  `editorOpen` from it on every serialize (no state to sync, survives a restart), and
+  `pushSessionsForFolder()` re-pushes every session sharing a cwd after an open or a close, because a
+  window belongs to a folder rather than to one session.
+- **A close costs about 6 seconds** (Add-Type compile plus `EnumWindows` at ~0.6s, `Get-Process` per
+  window, plus a 0.7s settle wait before asking whether the window went away). The first 8s cap was
+  too tight and reported real closes as timeouts, so it is now 25s (`CMC_CLOSE_TIMEOUT_MS`), the UI
+  toasts "Closing VS Code..." immediately, and the button's re-entrancy release is 30s so it can
+  never fire mid-flight.
+- The end-of-session offer travels as its own `{ type:'editor-prompt' }` SSE frame rather than being
+  inferred from the status change, so it fires exactly once even when the card is filtered out of
+  view. `view-sessions.js` queues the prompts (`showConfirm` reuses one dialog element, and two
+  sessions can end in the same second) via a new optional `showConfirm({ onClose })` hook.
+
+**The New session popup is wider for this** (`.pop.newsession-pop { max-width: 760px }`, a
+popup-specific cap so the confirm and Settings dialogs keep theirs). `.chain` is now `nowrap` with
+`.chain > .sel { flex: 1 1 0; min-width: 0 }`, re-wrapping only under 560px. `min-width: 0` is the
+load-bearing half: a flex item defaults to `min-width: auto`, which on a `<select>` resolves to its
+content width, so a long folder name forced the row wider than the panel instead of shrinking the
+control (the same trap as the `.session-card` `minmax(0, 1fr)` note below). `.ghostbtn` gained
+`white-space: nowrap` because the footer's `.path` takes every spare pixel and "VS Code" broke onto
+two lines. `scripts/render-check.mjs` asserts the four-deep chain sits on one row at 700px and up,
+never overflows the panel at any width, that only this popup got the wider cap, and that the footer
+buttons stay one equal-height row.
+
 ## Usage feed: context window and 5h/7d quota (`statusline-feed.mjs`)
 The 5-hour and 7-day rate-limit windows and the true context-window percentage are in NO hook
 payload, in NO transcript, and there is no `claude usage` subcommand. The only local source is the
@@ -424,7 +515,15 @@ app's back/forward history and the Settings popup.
   `--shot <file>` saves a screenshot. This exists because a CSS grid blowout (see the card notes
   above) was invisible to code review and took one real measurement to find. Two traps it encodes:
   `chrome --dump-dom` never returns on this page because the open SSE connection means load never
-  completes, and the popup's visibility lives on `#newSessionBackdrop`, not on the panel.
+  completes, and the popup's visibility lives on `#newSessionBackdrop`, not on the panel. It also
+  covers the VS Code buttons (one POST per double click, sessionId only, no stray `/focus`, no
+  confirm) and the New session popup's one-row folder chain.
+- **A spawn shape can be provably correct and still open nothing.** Both the `ELECTRON_RUN_AS_NODE`
+  and the `detached` findings behind "Open in VS Code" passed every static and dry-run check and were
+  only exposed by spawning for real and then ENUMERATING WINDOW TITLES (`EnumWindows` +
+  `GetWindowText` via `Add-Type`, read-only, no focus stealing) to see whether a window actually
+  appeared. `Get-Process | MainWindowTitle` is not enough: extra Electron windows live in the same
+  process, so a second VS Code window never shows up there.
 - **Any ad hoc test server MUST run with `CMC_DRY_RUN=1` and a temp HOME.** `server.lock` is how
   `send-event.mjs` and `statusline-feed.mjs` find the one real server, so a test server that writes
   it hijacks the whole machine: hooks then POST to a scratch port, and since the lock is only cleaned

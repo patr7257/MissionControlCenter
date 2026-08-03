@@ -398,6 +398,516 @@ export function listRepos() {
   }
 }
 
+// Is `p` the repos root itself, or inside it? Used to bound the ONE path that
+// arrives from the browser (the New session popup's folder chain, which can only
+// ever produce a node out of listRepos()); a session's own cwd is server-owned
+// data and deliberately NOT bounded this way, since a session may legitimately
+// run outside ~/repos. The `root + '/'` prefix rather than a bare startsWith is
+// what stops a sibling like ~/repositories-secret passing, and normalizePath's
+// realpath step collapses any `..` before the comparison (so the caller must
+// verify the folder EXISTS first: realpath cannot resolve a missing path).
+export function isInsideReposRoot(p) {
+  const root = normalizePath(path.join(os.homedir(), 'repos'));
+  const target = normalizePath(p);
+  if (!root || !target) return false;
+  return target === root || target.startsWith(root + '/');
+}
+
+// ---- Open a folder in VS Code -------------------------------------------------
+//
+// LOAD-BEARING: this never goes through wt/spawnWt and never pushes to
+// managedTabs. A tab that runs `code .` and then closes itself would shift every
+// LATER tab down by one while managedTabs keeps its old positional tabIndex, so
+// every subsequent focus click would jump to the wrong tab. VS Code detaches
+// itself anyway, so there is no terminal to close: spawning the GUI exe directly
+// is both simpler and the only way to guarantee no console window ever appears.
+const VSCODE_EXE_ENV = 'CMC_VSCODE_EXE';
+// Static, PATH-free candidates, tried after `where code`. A user-scope install is
+// what this machine has; the Program Files ones cover a system-wide install and
+// the Insiders pair covers the other channel.
+function vsCodeCandidates() {
+  const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  const pf = process.env.ProgramFiles || 'C:\\Program Files';
+  const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  return [
+    path.join(local, 'Programs', 'Microsoft VS Code', 'Code.exe'),
+    path.join(pf, 'Microsoft VS Code', 'Code.exe'),
+    path.join(pf86, 'Microsoft VS Code', 'Code.exe'),
+    path.join(local, 'Programs', 'Microsoft VS Code Insiders', 'Code - Insiders.exe'),
+    path.join(pf, 'Microsoft VS Code Insiders', 'Code - Insiders.exe'),
+  ];
+}
+
+// `code` on PATH is a launcher script, not the app: bin/code.cmd (and an
+// extensionless bash shim next to it). Node refuses to spawn a .cmd without
+// shell:true, and shell:true means cmd.exe, which is both a console-window flash
+// and a quoting hazard, so map the launcher to the GUI exe that sits one level up
+// instead of ever spawning the script.
+const VSCODE_LAUNCHER_TO_EXE = {
+  'code.cmd': 'Code.exe',
+  'code.bat': 'Code.exe',
+  'code-insiders.cmd': 'Code - Insiders.exe',
+  'code-insiders.bat': 'Code - Insiders.exe',
+};
+
+function vsCodeExeFromLauncher(launcher) {
+  const base = path.basename(launcher).toLowerCase();
+  const exeName = VSCODE_LAUNCHER_TO_EXE[base];
+  if (!exeName) return null;
+  const binDir = path.dirname(launcher);
+  if (path.basename(binDir).toLowerCase() !== 'bin') return null;
+  const exe = path.join(path.dirname(binDir), exeName);
+  return fs.existsSync(exe) ? exe : null;
+}
+
+// Ask Windows where `code` is. Absolute System32 path first, because `where`
+// itself is only reachable via PATH through System32, which is exactly the thing
+// that might be missing. Bounded and fully guarded like isWtRunning(), but it
+// fails CLOSED (returns null on any error) so resolution falls through to the
+// static candidates rather than pretending to have found something.
+function whereVsCode() {
+  try {
+    const system32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'where.exe');
+    const exe = fs.existsSync(system32) ? system32 : 'where';
+    const result = spawnSync(exe, ['code'], { encoding: 'utf8', timeout: 1500, windowsHide: true });
+    if (result.error || result.status !== 0) return null;
+    const lines = String(result.stdout || '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .filter((l) => /\.(exe|cmd|bat)$/i.test(l));
+    // Prefer a real .exe if one is on PATH; otherwise the launcher script, which
+    // vsCodeExeFromLauncher maps to the app next to it.
+    const direct = lines.find((l) => /\.exe$/i.test(l));
+    if (direct && fs.existsSync(direct)) return direct;
+    for (const line of lines) {
+      const mapped = vsCodeExeFromLauncher(line);
+      if (mapped) return mapped;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// undefined = never resolved, null = resolved to nothing, string = the exe path.
+let vsCodeExeCache;
+let vsCodeMissAt = 0;
+// A positive result is cached for the process lifetime (the `where` spawn is the
+// only blocking call in the click path). A miss is cached for 30s only, so
+// installing VS Code mid-session starts working without a server restart, while a
+// rapid double click still cannot spawn `where` twice.
+const VSCODE_MISS_TTL_MS = 30000;
+
+function resolveVsCodeExe() {
+  if (typeof vsCodeExeCache === 'string') return vsCodeExeCache;
+  if (vsCodeExeCache === null && Date.now() - vsCodeMissAt < VSCODE_MISS_TTL_MS) return null;
+  const found = whereVsCode() || vsCodeCandidates().find((c) => fs.existsSync(c)) || null;
+  vsCodeExeCache = found;
+  if (!found) vsCodeMissAt = Date.now();
+  return found;
+}
+
+// Sibling of buildReadableCommand for a non-wt exec: same readability contract
+// (quote the free-form values that may contain spaces), no `wt` prefix. Nothing
+// here is ever handed to a shell, so the quotes are for the reader only.
+function buildReadableExec(exe, args) {
+  return [exe, ...args].map((a) => '"' + a + '"').join(' ');
+}
+
+// LOAD-BEARING, and found only by really spawning it: VS Code is an Electron app,
+// so an inherited ELECTRON_RUN_AS_NODE=1 turns Code.exe into a bare Node
+// interpreter that tries to `require` the folder path and dies with
+// "Cannot find module C:\...\<folder>". Nothing is visible when that happens
+// (stdio is ignored, the process just exits 1), so it reads as "the button does
+// nothing".
+//
+// This is not hypothetical: desktop/main.mjs spawns server.mjs with
+// ELECTRON_RUN_AS_NODE=1 (that is how Electron doubles as Node), and the server
+// passes its env to children, so EVERY packaged install would have hit it. It is
+// also set in a Claude Code session's own environment, which is how it was caught.
+// Exported so scripts/smoke-server.mjs can assert it, the same reason
+// installerSpawnArgs() exists.
+export function editorSpawnEnv(base) {
+  const env = { ...(base || {}) };
+  delete env.ELECTRON_RUN_AS_NODE;
+  return env;
+}
+
+const MAX_FOLDER_LEN = 4096;
+
+// ---- Which folders WE opened in VS Code ---------------------------------------
+//
+// The close action is deliberately scoped to windows this app opened, so it can
+// never propose closing an editor the developer opened by hand. That means we have
+// to remember them: the spawned Code.exe exits immediately (it only forwards the
+// folder to the already-running instance), so there is no pid or window handle to
+// hold on to, only the folder itself.
+//
+// Keyed by normalizePath so a junction, a trailing slash or different casing all
+// resolve to the same entry. Persisted next to managed-tabs.json so the button
+// survives a server restart, pruned by age and capped, and (like managedTabs) the
+// in-memory record is kept even under CMC_DRY_RUN while the file write is skipped.
+const OPENED_EDITORS_FILE = path.join(STATE_DIR, 'opened-editors.json');
+const MAX_OPENED_EDITORS = 200;
+const OPENED_EDITOR_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function loadOpenedEditors() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(OPENED_EDITORS_FILE, 'utf8'));
+    if (!Array.isArray(parsed)) return [];
+    const cutoff = Date.now() - OPENED_EDITOR_TTL_MS;
+    return parsed
+      .filter((e) => e && typeof e.folder === 'string' && typeof e.openedAt === 'number' && e.openedAt >= cutoff)
+      .slice(-MAX_OPENED_EDITORS);
+  } catch {
+    return [];
+  }
+}
+
+function saveOpenedEditors() {
+  if (process.env.CMC_DRY_RUN) return;
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(OPENED_EDITORS_FILE, JSON.stringify(openedEditors));
+  } catch {
+    // best effort only
+  }
+}
+
+// Entries are { folder, key, openedAt }. Unlike managedTabs nothing here is
+// positional, so this one is safely trimmable.
+export const openedEditors = loadOpenedEditors();
+
+function recordOpenedEditor(folder) {
+  const key = normalizePath(folder);
+  if (!key) return;
+  const existing = openedEditors.find((e) => e.key === key);
+  if (existing) {
+    existing.openedAt = Date.now();
+    existing.folder = folder;
+  } else {
+    openedEditors.push({ folder, key, openedAt: Date.now() });
+    while (openedEditors.length > MAX_OPENED_EDITORS) openedEditors.shift();
+  }
+  saveOpenedEditors();
+}
+
+export function hasOpenedEditor(folder) {
+  const key = normalizePath(folder);
+  if (!key) return false;
+  return openedEditors.some((e) => e.key === key);
+}
+
+function forgetOpenedEditor(folder) {
+  const key = normalizePath(folder);
+  if (!key) return;
+  for (let i = openedEditors.length - 1; i >= 0; i -= 1) {
+    if (openedEditors[i].key === key) openedEditors.splice(i, 1);
+  }
+  saveOpenedEditors();
+}
+
+// Opens `folderPath` as a folder in VS Code. Best effort like every other export
+// here: never throws, always returns a result object.
+//
+// `reason` on a failure mirrors focusSession's `mode` so the frontend can branch
+// without regexing prose, while `error` stays human because the UI prints it
+// verbatim. ok:true means the process was STARTED, never that a window appeared
+// (we hand off to a detached GUI app and never hear back), which is why the UI
+// copy stays present continuous.
+export function openInVsCode(folderPath) {
+  try {
+    const raw = folderPath === undefined || folderPath === null ? '' : String(folderPath);
+    if (!raw.trim()) {
+      return { ok: false, reason: 'bad-folder', error: 'No folder to open.' };
+    }
+    if (raw.length > MAX_FOLDER_LEN || /[\0\r\n]/.test(raw)) {
+      return { ok: false, reason: 'bad-folder', error: 'That folder path is not usable.' };
+    }
+    const folder = path.resolve(raw);
+    let stat;
+    try {
+      stat = fs.statSync(folder);
+    } catch {
+      return { ok: false, reason: 'bad-folder', error: 'That folder no longer exists: ' + folder };
+    }
+    if (!stat.isDirectory()) {
+      return { ok: false, reason: 'bad-folder', error: 'That path is a file, not a folder: ' + folder };
+    }
+
+    // An override that points at nothing is a configuration mistake worth
+    // reporting, not something to silently paper over by falling back to
+    // discovery: the developer set it on purpose.
+    const override = process.env[VSCODE_EXE_ENV];
+    let exe;
+    if (override) {
+      if (!fs.existsSync(override)) {
+        return {
+          ok: false,
+          reason: 'no-editor',
+          error: VSCODE_EXE_ENV + ' points at a file that does not exist: ' + override,
+        };
+      }
+      exe = override;
+    } else {
+      exe = resolveVsCodeExe();
+    }
+    if (!exe) {
+      return {
+        ok: false,
+        reason: 'no-editor',
+        error: 'Could not find VS Code. Set ' + VSCODE_EXE_ENV + ' to the full path of Code.exe.',
+      };
+    }
+
+    // NOTE: firstSemicolonArg() deliberately does NOT apply here. The semicolon
+    // rule is a Windows Terminal command-line invariant and this path builds no
+    // command line, so a folder named 'a;b' opens fine even though /launch must
+    // refuse it. normalizePath() must not be used for the spawned argument
+    // either: it lowercases, so it is a comparison key only.
+    const args = [folder];
+    const command = buildReadableExec(exe, args);
+    if (process.env.CMC_DRY_RUN) {
+      recordOpenedEditor(folder);
+      return { ok: true, exe, folder, command, dryRun: true };
+    }
+
+    const child = spawn(exe, args, {
+      // detached + unref so the child outlives this process. That matters because
+      // a second Code.exe does not open the window itself: it connects to the
+      // already-running instance over a named pipe, forwards the folder and exits,
+      // and being killed during that handoff means NOTHING happens at all
+      // (measured: a non-detached spawn from a short-lived parent opened no
+      // window, the detached one did).
+      //
+      // Windows ignores CREATE_NO_WINDOW (windowsHide) when DETACHED_PROCESS
+      // (detached) is set, which would matter for a console program. It does not
+      // matter here: Code.exe is a GUI-subsystem binary (PE subsystem 2, verified)
+      // so it has no console to show either way. windowsHide stays as correct
+      // intent in case the resolved exe is ever a console launcher.
+      detached: true,
+      windowsHide: true,
+      stdio: 'ignore',
+      shell: false,
+      // Without this, an inherited ELECTRON_RUN_AS_NODE makes Code.exe behave as
+      // Node and never open a window. See editorSpawnEnv above.
+      env: editorSpawnEnv(process.env),
+    });
+    // MANDATORY: spawn reports ENOENT/EACCES asynchronously via 'error', which
+    // the try/catch above cannot see. With no listener it becomes an uncaught
+    // exception and takes the whole server down.
+    child.on('error', () => {});
+    child.unref();
+    recordOpenedEditor(folder);
+    return { ok: true, exe, folder, command };
+  } catch (error) {
+    return { ok: false, reason: 'spawn-failed', error: String(error) };
+  }
+}
+
+// ---- Closing a VS Code window -------------------------------------------------
+//
+// There is NO VS Code CLI for this: `code` can open, diff and report status, but
+// nothing closes a window (`code --status` only lists window TITLES, with folder
+// names as basenames and no paths, and takes ~2.6s). So the only mechanism is
+// Win32: resolve the window handle and post WM_CLOSE to it.
+//
+// WM_CLOSE is a message addressed to ONE specific handle, not input. It needs no
+// focus, changes no focus, and is the same request the window's X button makes, so
+// VS Code still runs its own "save your changes?" prompt. That is what separates it
+// from the banned SendKeys/SetForegroundWindow class, where the target is whatever
+// happens to have focus at that instant. Approved for this use on 2026-08-03.
+//
+// Identification is the weak link and is handled by refusing rather than guessing:
+// every VS Code window belongs to the SAME pid (the Electron main process), so a
+// handle can only be matched by title, and VS Code's default title carries the
+// folder BASENAME, not its path. Two open folders with the same basename are
+// therefore indistinguishable, so 2+ matches means "ambiguous", not "close the
+// first one". Same discipline as focusSession's lazy adopt.
+const CLOSE_WINDOW_HELPER = `
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public class CmcCloser {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  public class Win { public IntPtr Handle; public string Title; public uint Pid; }
+  public static List<Win> Windows() {
+    var list = new List<Win>();
+    EnumWindows(delegate(IntPtr h, IntPtr l) {
+      if (!IsWindowVisible(h)) return true;
+      var sb = new StringBuilder(1024);
+      GetWindowText(h, sb, 1024);
+      if (sb.Length == 0) return true;
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      list.Add(new Win { Handle = h, Title = sb.ToString(), Pid = pid });
+      return true;
+    }, IntPtr.Zero);
+    return list;
+  }
+  public static bool Close(IntPtr h) { return PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero); }
+  public static bool Alive(IntPtr h) { return IsWindow(h) && IsWindowVisible(h); }
+}
+`;
+
+// Only windows owned by a VS Code process may be closed, so a same-named window
+// belonging to something else (an Explorer folder, a browser tab title) can never
+// be hit by a title match.
+const VSCODE_PROCESS_NAMES = ['code', 'code - insiders'];
+
+// The base name is compared against VS Code's title format,
+// `${dirty}${activeEditorShort} - ${rootName} - ${appName}`, so the folder is
+// either the whole title's first segment (no editor open) or the segment right
+// before the app name. Hence the (^|' - ') alternation.
+function closeWindowScript(baseName) {
+  return [
+    "$ErrorActionPreference = 'Continue'",
+    // Titles can carry non-ASCII (æ/ø/å in a folder name); without this the JSON
+    // comes back in the console codepage and Node reads it as mojibake.
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    'Add-Type -TypeDefinition ' + psQuote(CLOSE_WINDOW_HELPER) + " -ErrorAction Stop | Out-Null",
+    '$base = ' + psQuote(baseName),
+    "$pattern = '(?:^|\\ -\\ )' + [Regex]::Escape($base) + '\\ -\\ Visual\\ Studio\\ Code(?:\\ -\\ Insiders)?$'",
+    '$names = @(' + VSCODE_PROCESS_NAMES.map((n) => psQuote(n)).join(', ') + ')',
+    '$hits = @()',
+    'foreach ($w in [CmcCloser]::Windows()) {',
+    '  if ($w.Title -notmatch $pattern) { continue }',
+    '  $p = Get-Process -Id $w.Pid -ErrorAction SilentlyContinue',
+    '  if ($null -eq $p) { continue }',
+    '  if ($names -notcontains $p.ProcessName.ToLower()) { continue }',
+    '  $hits += $w',
+    '}',
+    'if ($hits.Count -eq 0) { Write-Output (ConvertTo-Json -Compress @{ matched = 0 }); exit 0 }',
+    'if ($hits.Count -gt 1) {',
+    '  Write-Output (ConvertTo-Json -Compress @{ matched = $hits.Count; titles = @($hits | ForEach-Object { $_.Title }) })',
+    '  exit 0',
+    '}',
+    '$target = $hits[0]',
+    '$posted = [CmcCloser]::Close($target.Handle)',
+    // A window with unsaved files does NOT disappear: VS Code puts up its own save
+    // prompt instead, which is correct and must be reported as pending, not failed.
+    'Start-Sleep -Milliseconds 700',
+    '$gone = -not [CmcCloser]::Alive($target.Handle)',
+    'Write-Output (ConvertTo-Json -Compress @{ matched = 1; posted = $posted; gone = $gone; title = $target.Title })',
+  ].join('\n');
+}
+
+// Measured cost of the window query on this machine: about 0.6s for the Add-Type
+// compile plus EnumWindows, plus the 0.7s settle wait, so a couple of seconds in
+// the normal case. The cap is generous because a slow first compile (cold .NET,
+// antivirus on the temp dir) must not be reported as a failure, and overridable so
+// a test can shorten it.
+const CLOSE_QUERY_TIMEOUT_MS = Number(process.env.CMC_CLOSE_TIMEOUT_MS) > 0
+  ? Number(process.env.CMC_CLOSE_TIMEOUT_MS)
+  : 25000;
+
+// Runs the script above and parses its one JSON line. Rejects nothing: like every
+// other export here it resolves to a result object.
+function runCloseWindow(baseName) {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    try {
+      // -EncodedCommand for the same reason the wt commands use it: the payload
+      // carries quotes, newlines and a C# type definition, and base64 cannot be
+      // re-split or codepage-mangled on the way through.
+      const child = spawn(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePsCommand(closeWindowScript(baseName))],
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }
+      );
+      const timer = setTimeout(() => {
+        try { child.kill(); } catch { /* already gone */ }
+        finish({ matched: -1, error: 'Timed out looking for the VS Code window.' });
+      }, CLOSE_QUERY_TIMEOUT_MS);
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.on('error', (error) => {
+        clearTimeout(timer);
+        finish({ matched: -1, error: String(error) });
+      });
+      child.on('close', () => {
+        clearTimeout(timer);
+        const line = stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop();
+        try {
+          finish(JSON.parse(line || ''));
+        } catch {
+          finish({ matched: -1, error: 'Could not read the window query result.' });
+        }
+      });
+    } catch (error) {
+      finish({ matched: -1, error: String(error) });
+    }
+  });
+}
+
+// Closes the VS Code window showing `folderPath`. Async, unlike the rest of this
+// module, because the only honest answer needs the window query's result back.
+//
+// Refuses unless WE opened that folder (see openedEditors above), which is the
+// scope boundary the developer chose: this must never propose closing an editor
+// they opened by hand.
+export async function closeEditor(folderPath) {
+  try {
+    const raw = folderPath === undefined || folderPath === null ? '' : String(folderPath);
+    if (!raw.trim()) return { ok: false, reason: 'bad-folder', error: 'No folder to close.' };
+    const folder = path.resolve(raw);
+    if (!hasOpenedEditor(folder)) {
+      return {
+        ok: false,
+        reason: 'not-ours',
+        error: 'Mission Control did not open a VS Code window for this folder, so it will not close one.',
+      };
+    }
+    const baseName = path.basename(folder);
+    if (!baseName) return { ok: false, reason: 'bad-folder', error: 'That folder path has no name to match.' };
+
+    if (process.env.CMC_DRY_RUN) {
+      // Report the shape without touching any window, exactly as the launch paths do.
+      forgetOpenedEditor(folder);
+      return { ok: true, folder, baseName, closed: true, script: closeWindowScript(baseName), dryRun: true };
+    }
+
+    const result = await runCloseWindow(baseName);
+    if (result.matched === 1) {
+      // Forget it either way: the window is gone, or VS Code is asking about
+      // unsaved files and the developer owns the outcome from here. Keeping the
+      // record would leave a Close button that can no longer do anything useful.
+      forgetOpenedEditor(folder);
+      return { ok: true, folder, baseName, closed: !!result.gone, title: result.title || null };
+    }
+    if (result.matched === 0) {
+      // Already closed by hand: drop the record so the button stops offering it.
+      forgetOpenedEditor(folder);
+      return { ok: false, reason: 'no-window', error: 'No open VS Code window for ' + baseName + ' (already closed?).' };
+    }
+    if (result.matched > 1) {
+      return {
+        ok: false,
+        reason: 'ambiguous',
+        error:
+          result.matched + ' VS Code windows are showing a folder called "' + baseName +
+          '", so Mission Control will not guess which one to close.',
+      };
+    }
+    return { ok: false, reason: 'spawn-failed', error: result.error || 'Could not query the open windows.' };
+  } catch (error) {
+    return { ok: false, reason: 'spawn-failed', error: String(error) };
+  }
+}
+
 // `name` is an optional user-supplied session name. When given it becomes both the
 // Claude display name (`claude --name`, shown in the prompt box, the /resume picker
 // and the terminal title) and the tab title, so the tab, Claude and the session card

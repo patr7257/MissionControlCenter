@@ -121,12 +121,30 @@ function serializeSession(s) {
     ctxTokens: s.ctxTokens != null ? s.ctxTokens : null,
     ctxSize: s.ctxSize != null ? s.ctxSize : null,
     usageAt: s.usageAt != null ? s.usageAt : null,
+    // True when THIS app opened a VS Code window for this cwd, which is what
+    // reveals the card's "Close VS Code" button. Derived on every serialize rather
+    // than stored on the session, so it needs no syncing and survives a restart
+    // (terminal.mjs persists the record). Two sessions in one folder both show the
+    // button and both refer to the same window: correct, if slightly redundant.
+    editorOpen: terminal.hasOpenedEditor(s.cwd),
   };
 }
 
 function pushSession(s) {
   broadcast({ type: 'session', session: serializeSession(s) });
   scheduleSaveSessions();
+}
+
+// A VS Code window belongs to a FOLDER, not to a session, so opening or closing
+// one changes `editorOpen` for every session sharing that cwd. Re-push them all so
+// no card is left showing a Close button for a window that is gone (or missing one
+// for a window that is open).
+function pushSessionsForFolder(folder) {
+  const key = terminal.normalizePath(folder);
+  if (!key) return;
+  for (const session of sessions.values()) {
+    if (terminal.normalizePath(session.cwd) === key) pushSession(session);
+  }
 }
 
 function snapshotPayload() {
@@ -621,6 +639,20 @@ function handleEvent(payload) {
       session.live = false;
       session.lastActivityAt = nowMs();
       pushSession(session);
+      // The session is over, so its editor window probably is too. Offer to close
+      // it, but only when WE opened it (terminal.mjs keeps that record), and only
+      // as an offer: the frontend raises its own confirm and nothing closes without
+      // a click. A dedicated frame rather than letting the board infer it from the
+      // status change, so it fires exactly once even when the card is filtered out
+      // of view.
+      if (session.cwd && terminal.hasOpenedEditor(session.cwd)) {
+        broadcast({
+          type: 'editor-prompt',
+          sessionId: session.id,
+          folder: session.cwd,
+          name: session.title || session.project || session.id,
+        });
+      }
       return;
     }
     default:
@@ -1322,6 +1354,96 @@ const server = http.createServer((req, res) => {
         result = terminal.reopenSession(sessionId, cwd, title);
       } catch (error) {
         result = { ok: false, error: String(error) };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(result));
+    });
+    return;
+  }
+
+  // Open a folder in VS Code. One endpoint, two ways to name the folder:
+  // - { sessionId }: the session cards. The cwd is resolved SERVER side from the
+  //   sessions map, exactly as /focus and /reopen do, so a path the page invented
+  //   is never trusted when an id is available. Not bounded to ~/repos: a
+  //   session's cwd is our own data and may legitimately live anywhere.
+  // - { repo }: the New session popup's folder chain, i.e. a client-supplied
+  //   path. Bounded to the repos root, because the picker can only ever produce a
+  //   node from listRepos() and because a cross-origin POST with a text/plain
+  //   body is a simple request that needs no preflight.
+  // sessionId wins when both are present.
+  if (req.method === 'POST' && url === '/open-editor') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 5_000_000) req.destroy(); // guard against runaway payloads
+    });
+    req.on('end', () => {
+      let result;
+      try {
+        const payload = JSON.parse(body || '{}');
+        if (payload.sessionId) {
+          const session = sessions.get(payload.sessionId);
+          const cwd = session ? session.cwd : null;
+          result = cwd
+            ? terminal.openInVsCode(cwd)
+            : { ok: false, reason: 'bad-folder', error: 'No known working directory for this session' };
+        } else if (payload.repo) {
+          // path.resolve first so `..` is collapsed lexically: normalizePath only
+          // collapses it via realpath, which cannot resolve a path that does not
+          // exist, and a folder that was deleted must still report "no longer
+          // exists" rather than "outside the repos root".
+          const repo = path.resolve(String(payload.repo));
+          result = terminal.isInsideReposRoot(repo)
+            ? terminal.openInVsCode(repo)
+            : { ok: false, reason: 'outside-root', error: 'That folder is outside the repos root.' };
+        } else {
+          result = { ok: false, reason: 'bad-folder', error: 'No session or folder given' };
+        }
+        if (result && result.ok && result.folder) pushSessionsForFolder(result.folder);
+      } catch (error) {
+        result = { ok: false, reason: 'spawn-failed', error: String(error) };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(result));
+    });
+    return;
+  }
+
+  // Close the VS Code window this app opened for a folder. Same folder resolution
+  // as /open-editor, and terminal.closeEditor() refuses outright unless we have a
+  // record of opening it, so this can never close an editor opened by hand.
+  // Async, unlike every other handler here: the honest answer needs the window
+  // query's result.
+  if (req.method === 'POST' && url === '/close-editor') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 5_000_000) req.destroy(); // guard against runaway payloads
+    });
+    req.on('end', async () => {
+      let result;
+      try {
+        const payload = JSON.parse(body || '{}');
+        let folder = null;
+        if (payload.sessionId) {
+          const session = sessions.get(payload.sessionId);
+          folder = session ? session.cwd : null;
+          if (!folder) result = { ok: false, reason: 'bad-folder', error: 'No known working directory for this session' };
+        } else if (payload.repo) {
+          const repo = path.resolve(String(payload.repo));
+          if (terminal.isInsideReposRoot(repo)) folder = repo;
+          else result = { ok: false, reason: 'outside-root', error: 'That folder is outside the repos root.' };
+        } else {
+          result = { ok: false, reason: 'bad-folder', error: 'No session or folder given' };
+        }
+        if (!result) {
+          result = await terminal.closeEditor(folder);
+          // The record is dropped on both success AND a no-window/already-closed
+          // answer, so refresh the cards either way rather than only on ok.
+          pushSessionsForFolder(folder);
+        }
+      } catch (error) {
+        result = { ok: false, reason: 'spawn-failed', error: String(error) };
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(result));

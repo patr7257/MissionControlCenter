@@ -19,6 +19,20 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const REGISTRY_POLL_MS = 250;
 const REGISTRY_DIR = path.join(TMP_HOME, '.claude', 'sessions');
 fs.mkdirSync(REGISTRY_DIR, { recursive: true });
+// openInVsCode() requires the folder to really exist, so the /open-editor cases
+// get real directories inside the temp HOME's repos root (the containment check
+// for a client-supplied path resolves against <HOME>/repos).
+const OPEN_DIR = path.join(TMP_HOME, 'repos', '1-Personal', 'opener-demo');
+const OPEN_SEMI_DIR = path.join(TMP_HOME, 'repos', '1-Personal', 'semi;colon');
+const OPEN_GONE_DIR = path.join(TMP_HOME, 'repos', '1-Personal', 'deleted-repo');
+const OPEN_OUTSIDE_DIR = path.join(TMP_HOME, 'not-repos');
+// Exists, is inside the repos root, and is deliberately never opened: the fixture
+// for "close refuses a folder this app did not open".
+const OPEN_GONE_NEVER_OPENED = path.join(TMP_HOME, 'repos', '1-Personal', 'never-opened');
+fs.mkdirSync(OPEN_GONE_NEVER_OPENED, { recursive: true });
+fs.mkdirSync(OPEN_DIR, { recursive: true });
+fs.mkdirSync(OPEN_SEMI_DIR, { recursive: true });
+fs.mkdirSync(OPEN_OUTSIDE_DIR, { recursive: true });
 // CMC_DRY_RUN keeps terminal.mjs from spawning real Windows Terminal tabs (and
 // from writing state files), so /launch can be asserted on any platform.
 const env = {
@@ -27,6 +41,11 @@ const env = {
   HOME: TMP_HOME,
   CMC_DRY_RUN: '1',
   CMC_REGISTRY_POLL_MS: String(REGISTRY_POLL_MS),
+  // VS Code is NOT installed on the CI runner, and this script must assert the
+  // command shape rather than discovery. process.execPath is a real existing
+  // executable everywhere, and nothing is ever spawned under CMC_DRY_RUN, so the
+  // reported command stays deterministic and platform neutral.
+  CMC_VSCODE_EXE: process.execPath,
 };
 
 // Registry files are keyed by pid; registryPidAlive() in server.mjs does a
@@ -277,6 +296,173 @@ try {
   check('POST /reopen reattaches with claude --resume in an encoded payload', reopened && reopened.ok === true && reopened.mode === 'reattached' && reopenScript.endsWith('claude --resume smoke-1'));
   check('POST /reopen sets the account env vars before claude --resume', hasGhEnvPrefix(reopenScript));
   check('POST /reopen generates no wt argument containing a semicolon', hasNoSemicolon(reopened));
+
+  // ---- Open in VS Code (POST /open-editor). Deliberately NOT routed through wt:
+  // a tab that ran `code .` and closed itself would shift every later tab down by
+  // one while managedTabs kept its old positional tabIndex, so every subsequent
+  // focus click would jump to the wrong tab. Hence a direct GUI-exe spawn, which
+  // is also why no console window can flash.
+  const openByPath = await (await fetch(`${BASE}/open-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: OPEN_DIR }),
+  })).json();
+  check('POST /open-editor with a client path succeeds', openByPath && openByPath.ok === true && openByPath.dryRun === true);
+  check(
+    'POST /open-editor reports the REAL command: the resolved exe plus the folder',
+    openByPath && typeof openByPath.command === 'string' &&
+      openByPath.command.includes(process.execPath) && openByPath.command.includes(OPEN_DIR)
+  );
+  check(
+    'POST /open-editor never routes through Windows Terminal or a shell (the tabIndex invariant)',
+    openByPath && !/(^|["\s])wt(\.exe)?["\s]/i.test(openByPath.command) &&
+      !/cmd(\.exe)?["\s]+\/c|powershell/i.test(openByPath.command) &&
+      !('tabIndex' in openByPath)
+  );
+
+  // A folder NAME containing a semicolon is fine here and refused by /launch: the
+  // semicolon rule is a wt command-line invariant and this path builds none.
+  const openSemi = await (await fetch(`${BASE}/open-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: OPEN_SEMI_DIR }),
+  })).json();
+  check('POST /open-editor accepts a folder name with a semicolon (unlike /launch, which must refuse it)', openSemi && openSemi.ok === true);
+
+  // The card path sends only a sessionId; the server resolves the cwd itself,
+  // exactly as /focus and /reopen do.
+  await fetch(`${BASE}/event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hook_event_name: 'SessionStart', session_id: 'smoke-open', cwd: OPEN_DIR }),
+  });
+  await sleep(200);
+  const openBySession = await (await fetch(`${BASE}/open-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-open' }),
+  })).json();
+  check(
+    'POST /open-editor resolves the folder server side from a sessionId alone',
+    openBySession && openBySession.ok === true && String(openBySession.command).includes(OPEN_DIR)
+  );
+  const openBoth = await (await fetch(`${BASE}/open-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-open', repo: OPEN_SEMI_DIR }),
+  })).json();
+  check(
+    'POST /open-editor prefers the server-resolved session cwd over a client path',
+    openBoth && openBoth.ok === true && String(openBoth.command).includes(OPEN_DIR) &&
+      !String(openBoth.command).includes(OPEN_SEMI_DIR)
+  );
+
+  const openUnknownRes = await fetch(`${BASE}/open-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'no-such-session' }),
+  });
+  const openUnknown = await openUnknownRes.json();
+  check(
+    'POST /open-editor for an unknown session answers 200 with an explanatory failure',
+    openUnknownRes.status === 200 && openUnknown && openUnknown.ok === false &&
+      /working directory/i.test(String(openUnknown.error))
+  );
+  const openGone = await (await fetch(`${BASE}/open-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: OPEN_GONE_DIR }),
+  })).json();
+  check('POST /open-editor refuses a folder that is gone', openGone && openGone.ok === false && /exist/i.test(String(openGone.error)));
+  const openOutside = await (await fetch(`${BASE}/open-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: OPEN_OUTSIDE_DIR }),
+  })).json();
+  check(
+    'POST /open-editor refuses a client path outside the repos root',
+    openOutside && openOutside.ok === false && openOutside.reason === 'outside-root'
+  );
+  const openTraversal = await (await fetch(`${BASE}/open-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: path.join(TMP_HOME, 'repos', '..', 'not-repos') }),
+  })).json();
+  check(
+    'POST /open-editor refuses a .. traversal out of the repos root',
+    openTraversal && openTraversal.ok === false && openTraversal.reason === 'outside-root'
+  );
+  const openEmpty = await (await fetch(`${BASE}/open-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })).json();
+  check('POST /open-editor with neither a session nor a folder fails cleanly', openEmpty && openEmpty.ok === false);
+
+  // ---- Closing a VS Code window (POST /close-editor). Scoped to windows THIS app
+  // opened, which is the whole safety story: there is no way to identify a window
+  // except by title, so refusing anything we have no record of is what stops it
+  // closing an editor the developer opened by hand.
+  const snapAfterOpen = await readSnapshot();
+  const openedSession = snapAfterOpen && snapAfterOpen.sessions.find((s) => s.id === 'smoke-open');
+  check('a session whose folder we opened reports editorOpen, so the card shows Close VS Code',
+    !!openedSession && openedSession.editorOpen === true);
+  const otherSession = snapAfterOpen && snapAfterOpen.sessions.find((s) => s.id === 'smoke-1');
+  check('a session whose folder we never opened reports editorOpen false',
+    !!otherSession && otherSession.editorOpen === false);
+
+  const closeNotOurs = await (await fetch(`${BASE}/close-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: OPEN_GONE_NEVER_OPENED }),
+  })).json();
+  check('POST /close-editor refuses a folder this app never opened',
+    closeNotOurs && closeNotOurs.ok === false && closeNotOurs.reason === 'not-ours');
+
+  const closeBySession = await (await fetch(`${BASE}/close-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-open' }),
+  })).json();
+  check('POST /close-editor closes the window for a folder we opened',
+    closeBySession && closeBySession.ok === true && closeBySession.dryRun === true);
+  check('POST /close-editor matches the window by folder BASENAME, never a full path',
+    closeBySession && closeBySession.baseName === path.basename(OPEN_DIR) &&
+      typeof closeBySession.script === 'string' && closeBySession.script.includes(path.basename(OPEN_DIR)) &&
+      !closeBySession.script.includes(OPEN_DIR));
+  check('the close script posts WM_CLOSE (0x0010) and never sends a keystroke or steals focus',
+    closeBySession && /PostMessage\(h, 0x0010/.test(closeBySession.script) &&
+      !/SendKeys|AppActivate|SetForegroundWindow|mouse_event|SendInput/i.test(closeBySession.script));
+  check('the close script only ever targets a VS Code process',
+    closeBySession && /ProcessName/.test(closeBySession.script) && closeBySession.script.includes("'code'"));
+  check('the close script refuses rather than guessing when two windows match',
+    closeBySession && /\$hits\.Count -gt 1/.test(closeBySession.script));
+
+  const closeTwice = await (await fetch(`${BASE}/close-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-open' }),
+  })).json();
+  check('closing forgets the record, so a second close is refused as not ours',
+    closeTwice && closeTwice.ok === false && closeTwice.reason === 'not-ours');
+  const snapAfterClose = await readSnapshot();
+  const closedSession = snapAfterClose && snapAfterClose.sessions.find((s) => s.id === 'smoke-open');
+  check('editorOpen goes back to false after a close, so the button disappears',
+    !!closedSession && closedSession.editorOpen === false);
+
+  const closeEmpty = await (await fetch(`${BASE}/close-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })).json();
+  check('POST /close-editor with neither a session nor a folder fails cleanly', closeEmpty && closeEmpty.ok === false);
+  const closeOutside = await (await fetch(`${BASE}/close-editor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: OPEN_OUTSIDE_DIR }),
+  })).json();
+  check('POST /close-editor refuses a client path outside the repos root',
+    closeOutside && closeOutside.ok === false && closeOutside.reason === 'outside-root');
 
   // Subagent-only session: a session that never gets a top-level hook (no
   // SessionStart/UserPromptSubmit of its own) must not sit on the 'working'
@@ -668,6 +854,50 @@ try {
   check('update dir sweep leaves unrelated temp dirs alone', fs.existsSync(unrelated));
   check('update dir sweep is scoped to the root it was given, not the real temp dir',
     fs.existsSync(sweepRoot) && fs.readdirSync(sweepRoot).length === 2);
+
+  // ---- openInVsCode branches the running server cannot reach (its
+  // CMC_VSCODE_EXE is fixed at spawn time), asserted by importing terminal.mjs
+  // here the same way the desktop modules above are. CMC_DRY_RUN keeps this
+  // process from spawning anything; the child server has its own explicit env, so
+  // mutating ours cannot disturb it.
+  process.env.CMC_DRY_RUN = '1';
+  const terminal = await import('../terminal.mjs');
+  check('terminal.mjs exports openInVsCode', typeof terminal.openInVsCode === 'function');
+  const prevExe = process.env.CMC_VSCODE_EXE;
+  process.env.CMC_VSCODE_EXE = path.join(TMP_HOME, 'no-such-code.exe');
+  const badOverride = terminal.openInVsCode(OPEN_DIR);
+  process.env.CMC_VSCODE_EXE = prevExe === undefined ? process.execPath : prevExe;
+  check('a CMC_VSCODE_EXE override that does not exist is reported, not silently ignored',
+    badOverride && badOverride.ok === false && badOverride.reason === 'no-editor' &&
+      /CMC_VSCODE_EXE/.test(String(badOverride.error)));
+  const emptyFolder = terminal.openInVsCode('');
+  check('openInVsCode refuses an empty folder', emptyFolder && emptyFolder.ok === false && emptyFolder.reason === 'bad-folder');
+  const notADir = terminal.openInVsCode(SERVER);
+  check('openInVsCode refuses a path that is a file, not a folder',
+    notADir && notADir.ok === false && /not a folder/i.test(String(notADir.error)));
+  // The cheapest possible guard against a future refactor routing this through wt:
+  // an entry here would desync every later tabIndex from the real tab positions.
+  const tabsBefore = terminal.managedTabs.length;
+  terminal.openInVsCode(OPEN_DIR);
+  check('openInVsCode adds no managedTabs entry (the positional tabIndex invariant)',
+    terminal.managedTabs.length === tabsBefore);
+  // ELECTRON_RUN_AS_NODE must never reach Code.exe: VS Code is an Electron app, so
+  // it would run as a bare Node interpreter, try to require the folder path and
+  // exit 1 with nothing visible (stdio is ignored), i.e. the button silently does
+  // nothing. desktop/main.mjs spawns server.mjs with exactly that variable set, so
+  // every packaged install would have hit it. Caught by really spawning it.
+  const spawnEnv = terminal.editorSpawnEnv({ ELECTRON_RUN_AS_NODE: '1', PATH: 'keep-me', CMC_X: 'y' });
+  check('editorSpawnEnv strips ELECTRON_RUN_AS_NODE so Code.exe does not run as Node',
+    !('ELECTRON_RUN_AS_NODE' in spawnEnv));
+  check('editorSpawnEnv keeps the rest of the environment', spawnEnv.PATH === 'keep-me' && spawnEnv.CMC_X === 'y');
+  check('editorSpawnEnv never mutates the env it was given', (() => {
+    const base = { ELECTRON_RUN_AS_NODE: '1' };
+    terminal.editorSpawnEnv(base);
+    return base.ELECTRON_RUN_AS_NODE === '1';
+  })());
+  check('isInsideReposRoot accepts a folder in the repos root and rejects a sibling',
+    terminal.isInsideReposRoot(path.join(os.homedir(), 'repos', 'anything')) === true &&
+      terminal.isInsideReposRoot(path.join(os.homedir(), 'repos-secret')) === false);
 
   process.stdout.write(failed ? '\nRESULT: FAIL\n' : '\nRESULT: ALL PASS\n');
   await cleanup(failed ? 1 : 0);
