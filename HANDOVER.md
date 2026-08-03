@@ -148,9 +148,14 @@ cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; git tag fleet-v0.2.0; gi
   tree" and `git worktree list` looks clean while the directory still exists.
 - **After a squash merge, `git log origin/main..<branch>` is NOT empty** and that is expected. Prove
   parity with `git diff --stat main <branch>` before deleting the branch.
-- **`~/.config/gh-personal` can drift to the wrong active user.** Symptom: `gh pr ready` fails with
-  "przrm does not have the correct permissions" on a personal repo. Per-process fix that touches no
-  shared config: `GH_TOKEN="$(gh auth token --user patr7257)" gh <command>`.
+- **`~/.config/gh-personal` can drift to the wrong active user.** Symptoms: `gh pr ready` fails with
+  "przrm does not have the correct permissions" on a personal repo, `gh project item-list` fails on a
+  missing `read:project` scope, and `git push` gets a 403 ("Permission to patr7257/... denied to
+  przrm") because `~/.gitconfig` routes credentials through that same config dir. Per-process fixes
+  that touch no shared config and never put the token in argv:
+  `GH_TOKEN="$(gh auth token --user patr7257)" gh <command>` for gh, and
+  `GH_TOKEN=... git -c credential.helper="" -c credential.helper="!gh auth git-credential" push`
+  for git. Do NOT reach for a machine-wide `gh auth switch`.
 - Still true from before: `wt` splits on `;` even inside one quoted argument; an updater only fixes
   FUTURE hops; a packaged app is a separate allowlist from the repo; `server.lock` can be hijacked by
   a test server (always `CMC_DRY_RUN=1` plus a temp HOME); PowerShell 5.1 `-Encoding utf8` writes a
@@ -180,9 +185,15 @@ cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; git tag fleet-v0.2.0; gi
   is listening. The real `server.lock` correctly points at pid 8552 on port 4317.
 - No Docker (daemon down, and no Claude session marker, so nothing to stop). Keep-awake NOT active,
   lid-close power defaults intact. No cron or scheduled jobs created.
-- `main` is the ONLY worktree. The `MissionControlCenter-27` worktree is removed (registration,
-  contents and the leftover empty directory), the local and remote `feat/open-in-vscode` branches
-  are deleted, no gone-upstream branches remain, no open PRs, no open issues, board all Done.
+- `main` is the ONLY worktree and the ONLY branch, local and remote. The `MissionControlCenter-27`
+  worktree is removed (registration, contents and the leftover empty directory), and
+  `feat/open-in-vscode` is deleted both sides. No open PRs, no open issues, board all Done.
+- **Three stale REMOTE branches were found and deleted with Patrick's go-ahead**:
+  `fix/adopt-session-rename`, `fix/header-icon-group`, `fix/updater-msiexec-quotes`, all from merged
+  PRs (#24, #26, #19) on 2026-07-30. The previous handover claimed remote branches were already
+  deleted; they were not, so verify `git ls-remote --heads origin` rather than trusting that claim.
+- The new `~/.claude/agent-fleet-monitor/opened-editors.json` was deleted at session end: it held
+  only two test records pointing at deleted scratchpad folders, so a fresh install starts clean.
 - Exactly ONE VS Code window is open, `MW_service_tool`, which is Patrick's own and was never
   touched. Every probe window this session created was closed again, confirmed by enumerating window
   titles at the end.
