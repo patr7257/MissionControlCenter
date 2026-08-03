@@ -335,7 +335,15 @@ For stopping a session on purpose ("back at 16:00") rather than finishing it.
   session id from `CLAUDE_CODE_SESSION_ID` and the name/cwd from Claude Code's live registry
   (`~/.claude/sessions/<CLAUDE_PID>.json`, which is what `/rename` updates), falling back to the
   transcript's `customTitle`. No guessing: with no id and no `--id` it fails loudly. Modes: flag (with
-  an optional free-text note), `--list`, `--unflag [id]`, `--id/--name` for another session.
+  an optional free-text note), `--list`, `--unflag [id]`, `--id/--name/--cwd` for another session.
+- **`--find "<session name>"` flags an EARLIER session**, which is the shape actually left over after
+  one ends: Claude Code prints `claude --resume "<name>"`, so a NAME is what Patrick has in hand for a
+  session that is already gone. It resolves the name to that session's id AND cwd from the board's own
+  `sessions.json` (which stores `title`/`id`/`cwd`), falling back to scanning transcript `customTitle`
+  lines for a session the board has pruned. **The cwd is the load-bearing part**: it becomes the
+  resumed tab's working directory, so `process.cwd()` is the LAST fallback and is only ever right for
+  "flag the session I am in". 0 matches and 2+ matches both refuse, the latter listing the candidates,
+  because silently picking the newest would resume the wrong session in the wrong folder.
 - **The skill is `skills/resume-later/SKILL.md`** in this repo, junction-linked to
   `~/.claude/skills/resume-later` so `/resume-later` works from any repo, and it calls the script
   through `~/.claude/skills/agent-fleet-monitor/scripts/flag-resume.mjs` (the same junction trick the
