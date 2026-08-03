@@ -89,7 +89,10 @@ async function readSnapshot() {
   return null;
 }
 
-const srv = spawn(process.execPath, [SERVER, '--port', String(PORT)], { env, stdio: 'ignore' });
+// stderr is INHERITED, not ignored: a server that throws used to fail this suite
+// with a wall of unexplained FAILs and no stack trace anywhere, in CI included.
+// stdout stays ignored (the server is chatty about backfill on boot).
+const srv = spawn(process.execPath, [SERVER, '--port', String(PORT)], { env, stdio: ['ignore', 'ignore', 'inherit'] });
 
 async function cleanup(code) {
   try {
@@ -854,6 +857,87 @@ try {
   check('update dir sweep leaves unrelated temp dirs alone', fs.existsSync(unrelated));
   check('update dir sweep is scoped to the root it was given, not the real temp dir',
     fs.existsSync(sweepRoot) && fs.readdirSync(sweepRoot).length === 2);
+
+  // ---- Resume flags. The flag file is written by the /resume-later skill from
+  // inside another process, so the server must read it FRESH rather than cache it:
+  // written here AFTER the server booted, and expected to show up immediately.
+  const FLAGS_FILE = path.join(TMP_HOME, '.claude', 'agent-fleet-monitor', 'resume-flags.json');
+  fs.mkdirSync(path.dirname(FLAGS_FILE), { recursive: true });
+  fs.writeFileSync(FLAGS_FILE, JSON.stringify([
+    { sessionId: 'smoke-open', name: 'Flagged And Known', cwd: OPEN_DIR, project: 'opener-demo', note: 'back at 16:00', flaggedAt: Date.now() - 60000 },
+    { sessionId: 'never-seen-session', name: 'Flagged But Pruned', cwd: OPEN_DIR, project: 'opener-demo', note: null, flaggedAt: Date.now() - 3600000 },
+  ]));
+  const flagList = await (await fetch(`${BASE}/resume-flags`)).json();
+  check('GET /resume-flags reads a file written after the server started (no caching)',
+    flagList && Array.isArray(flagList.flags) && flagList.flags.length === 2);
+  const knownFlag = flagList.flags.find((f) => f.sessionId === 'smoke-open');
+  const prunedFlag = flagList.flags.find((f) => f.sessionId === 'never-seen-session');
+  check('a flag for a live session is enriched with what the board knows',
+    !!knownFlag && knownFlag.known === true && knownFlag.status !== null && knownFlag.note === 'back at 16:00');
+  check('a flag whose session is not on the board is still listed, marked unknown',
+    !!prunedFlag && prunedFlag.known === false && prunedFlag.name === 'Flagged But Pruned');
+
+  const resumed = await (await fetch(`${BASE}/resume-flagged`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-open' }),
+  })).json();
+  check('POST /resume-flagged reattaches the session',
+    resumed && resumed.ok === true && resumed.mode === 'reattached');
+  check('resuming a flagged session drops exactly that flag, leaving the other one',
+    resumed && resumed.unflagged === true && resumed.remaining === 1);
+  // ok and persisted differ under CMC_DRY_RUN on purpose: the removal is computed
+  // but the file is not touched, so a scratch server cannot delete real reminders.
+  check('a dry-run resume reports that the flag file was NOT actually rewritten',
+    resumed && resumed.persisted === false);
+  check('resuming a flagged session generates no wt argument containing a semicolon', hasNoSemicolon(resumed));
+
+  const notFlagged = await (await fetch(`${BASE}/resume-flagged`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-1' }),
+  })).json();
+  check('POST /resume-flagged refuses a session that is not flagged',
+    notFlagged && notFlagged.ok === false && /not flagged/i.test(String(notFlagged.error)));
+
+  const unflagged = await (await fetch(`${BASE}/unflag-resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'never-seen-session' }),
+  })).json();
+  // Both flags are still on disk here: the resume above computed its removal but
+  // did not write it (dry run), so unflagging the OTHER one leaves exactly one.
+  check('POST /unflag-resume drops a flag without resuming anything',
+    unflagged && unflagged.ok === true && unflagged.remaining === 1);
+  const unflagUnknown = await (await fetch(`${BASE}/unflag-resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'was-never-flagged' }),
+  })).json();
+  check('unflagging something that was never flagged reports it rather than pretending it worked',
+    unflagUnknown && unflagUnknown.ok === false && /not flagged/i.test(String(unflagUnknown.error)));
+
+  // ---- startedAt is a RUN start, not "when the server first noticed". The
+  // registry is authoritative and wins over whatever created the session, which is
+  // what makes the card's runtime ring meaningful (mtime made a five-hour session
+  // look seconds old, and NTFS tunneling makes birthtime jump around).
+  const REG_START = Date.now() - 137 * 60000;
+  writeRegistryFile(String(process.pid), {
+    pid: process.pid,
+    sessionId: 'smoke-started',
+    cwd: OPEN_DIR,
+    name: 'Started Long Ago',
+    status: 'busy',
+    startedAt: REG_START,
+    statusUpdatedAt: Date.now(),
+  });
+  await sleep(REGISTRY_POLL_MS * 3);
+  const startSnap = await readSnapshot();
+  const startedSession = startSnap && startSnap.sessions.find((s) => s.id === 'smoke-started');
+  check('a session adopts the registry startedAt, so its runtime is the real run length',
+    !!startedSession && Math.abs(startedSession.startedAt - REG_START) < 1000,
+    startedSession ? String(startedSession.startedAt) + ' vs ' + String(REG_START) : 'no session');
+  removeRegistryFile(String(process.pid));
 
   // ---- openInVsCode branches the running server cannot reach (its
   // CMC_VSCODE_EXE is fixed at spawn time), asserted by importing terminal.mjs

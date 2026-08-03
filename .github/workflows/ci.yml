@@ -50,3 +50,8 @@ jobs:
       # unmangled by Node's and cmd.exe's quoting rules.
       - name: Updater install command check
         run: node scripts/check-installer-launch.mjs
+
+      # The /resume-later skill's engine. Really spawns the CLI against a hermetic
+      # HOME, because its command surface is the contract the skill depends on.
+      - name: Resume-flag CLI check
+        run: node scripts/check-flag-resume.mjs

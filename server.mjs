@@ -28,6 +28,11 @@ const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 // Global usage (5h/7d rate-limit windows) persisted alongside the sessions
 // file; see the `usage` module-level state below.
 const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
+// Sessions the developer flagged to pick up later, written by the /resume-later
+// skill from INSIDE the session being flagged and read back here. Deliberately
+// always read fresh from disk rather than cached in memory: another process owns
+// the writes, so a cache would go stale the moment the skill runs.
+const RESUME_FLAGS_FILE = path.join(DATA_DIR, 'resume-flags.json');
 // Persisted sessions older than this (by lastActivityAt) are dropped on load so
 // the file cannot grow without bound. Ended sessions used to get a shorter
 // (24h) horizon, but that hid yesterday's closed-but-resumable sessions from
@@ -454,6 +459,59 @@ function loadPersistedSessions() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Resume flags: "I am stopping this session on purpose, remind me to pick it up"
+// ---------------------------------------------------------------------------
+// Shape on disk: [{ sessionId, name, cwd, project, note, flaggedAt }]. The
+// /resume-later skill appends; this server reads, and removes an entry once the
+// session has actually been resumed. Read fresh on every call (see the constant).
+function readResumeFlags() {
+  try {
+    const arr = JSON.parse(fs.readFileSync(RESUME_FLAGS_FILE, 'utf8'));
+    if (!Array.isArray(arr)) return [];
+    return arr.filter((f) => f && typeof f.sessionId === 'string' && f.sessionId);
+  } catch {
+    return []; // no flags file yet, or unreadable
+  }
+}
+
+// Returns { ok, persisted }: `ok` is "the request was handled", `persisted` is
+// "the file on disk actually changed". They differ under CMC_DRY_RUN, where writes
+// are skipped exactly as they are for sessions.json and managed-tabs.json, so a
+// scratch server can never delete the developer's real reminders. Reporting both
+// keeps the endpoints honest instead of claiming a removal that did not happen.
+function writeResumeFlags(flags) {
+  if (process.env.CMC_DRY_RUN) return { ok: true, persisted: false };
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(RESUME_FLAGS_FILE, JSON.stringify(flags, null, 2) + '\n');
+    return { ok: true, persisted: true };
+  } catch {
+    return { ok: false, persisted: false };
+  }
+}
+
+// A flag is enriched at read time with whatever the live sessions model knows, so
+// the picker can show the current name and status even for a flag written days
+// ago. The flag's own fields stay the fallback: a session that has since been
+// pruned from the board must still be resumable, since resuming needs only its id.
+function serializeResumeFlags() {
+  return readResumeFlags().map((f) => {
+    const s = sessions.get(f.sessionId) || null;
+    return {
+      sessionId: f.sessionId,
+      name: (s && s.title) || f.name || null,
+      cwd: (s && s.cwd) || f.cwd || null,
+      project: (s && s.project) || f.project || null,
+      note: f.note || null,
+      flaggedAt: typeof f.flaggedAt === 'number' ? f.flaggedAt : null,
+      status: s ? s.status : null,
+      live: s ? !!s.live : false,
+      known: !!s,
+    };
+  });
+}
+
 // Rehydrate the last-known global usage on start, so a restart shows the last
 // real numbers instead of blank until the next statusline invocation. Best
 // effort; a missing or unreadable file just leaves `usage` at its null default.
@@ -577,6 +635,12 @@ function handleEvent(payload) {
         const meta = readSessionMetaFromTranscript(transcript);
         session.branch = meta.branch || session.branch;
       }
+      // A SessionStart means a RUN just began, including a `claude --resume` of an
+      // old session, so the runtime clock restarts here even for a session we
+      // already knew about (from backfill or from the persisted file). Without
+      // this, a resumed session would keep showing the age of its original
+      // transcript, i.e. days, on the card's runtime ring.
+      session.startedAt = nowMs();
       session.status = 'working';
       session.live = true;
       session.source = 'hook';
@@ -943,7 +1007,18 @@ function backfillSessions() {
           continue;
         }
         if (nowMs() - stat.mtimeMs > BACKFILL_WINDOW_MS) continue;
-        candidates.push({ filePath, folderName: dir.name, mtimeMs: stat.mtimeMs, id: f.slice(0, -('.jsonl'.length)) });
+        // birthtimeMs (file creation) is when the session BEGAN; mtimeMs is its
+        // last write. Both are carried because they answer different questions:
+        // mtime drives the backfill window and lastActivityAt, birthtime drives
+        // startedAt. Windows/NTFS reports a real birthtime; the fallback covers a
+        // filesystem that reports 0.
+        candidates.push({
+          filePath,
+          folderName: dir.name,
+          mtimeMs: stat.mtimeMs,
+          birthtimeMs: stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.mtimeMs,
+          id: f.slice(0, -('.jsonl'.length)),
+        });
       }
     }
 
@@ -984,7 +1059,10 @@ function backfillSessions() {
         status: 'recent',
         title: null,
         lastPrompt: hist ? truncateLastPrompt(cleanTask(hist.display, null)) : null,
-        startedAt: c.mtimeMs,
+        // NOT mtimeMs: that is the last write, so a session running for five hours
+        // would have looked like it started seconds ago, which made the card's
+        // runtime ring read ~0 for exactly the long sessions it exists to flag.
+        startedAt: c.birthtimeMs,
         lastActivityAt: c.mtimeMs,
         live: isCwdLive(cwd),
         source: 'backfill',
@@ -1093,6 +1171,24 @@ function reconcileSessionRegistry() {
     // `/rename`, so it is adopted on every change rather than only when the
     // title is still empty (see applyLiveName).
     if (applyLiveName(session, entry.name)) changed = true;
+
+    // The registry is the AUTHORITATIVE source for when a run began: Claude Code
+    // records its own `startedAt` per live session, so it survives our restarts,
+    // is correct across a `--resume` (a resumed run writes a fresh entry), and
+    // needs no guessing. Everything else is a fallback for sessions with no
+    // registry file: a hook's nowMs() when we watched it start, and the
+    // transcript's creation time for a session we only ever found by scanning.
+    //
+    // That fallback is why this exists. The transcript's mtime was plainly wrong
+    // (it is the LAST write, so a five-hour session looked seconds old) and its
+    // birthtime is not stable either: Windows NTFS "tunneling" restores the
+    // original creation time when a file is recreated under the same name within
+    // ~15s, so a transcript being rewritten live reports a birthtime that jumps
+    // around. Measured on one file minutes apart: 10:24 once, 13:22 another time.
+    if (typeof entry.startedAt === 'number' && entry.startedAt > 0 && session.startedAt !== entry.startedAt) {
+      session.startedAt = entry.startedAt;
+      changed = true;
+    }
 
     const statusUpdatedAt = typeof entry.statusUpdatedAt === 'number' ? entry.statusUpdatedAt : null;
     const trustworthy = statusUpdatedAt === null || now - statusUpdatedAt <= REGISTRY_STALE_MS;
@@ -1444,6 +1540,88 @@ const server = http.createServer((req, res) => {
         }
       } catch (error) {
         result = { ok: false, reason: 'spawn-failed', error: String(error) };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(result));
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url === '/resume-flags') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ flags: serializeResumeFlags() }));
+    return;
+  }
+
+  // Resume a flagged session and clear its flag in ONE call. Two endpoints (reopen
+  // then unflag) would leave a window where a refused reattach had already dropped
+  // the flag, losing the reminder. The flag is therefore only cleared once
+  // terminal.reopenSession() reports success.
+  if (req.method === 'POST' && url === '/resume-flagged') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 5_000_000) req.destroy(); // guard against runaway payloads
+    });
+    req.on('end', () => {
+      let result;
+      try {
+        const payload = JSON.parse(body || '{}');
+        const sessionId = String(payload.sessionId || '');
+        const flags = readResumeFlags();
+        const flag = flags.find((f) => f.sessionId === sessionId) || null;
+        if (!sessionId) {
+          result = { ok: false, error: 'No session given' };
+        } else if (!flag) {
+          result = { ok: false, error: 'That session is not flagged for resume.' };
+        } else {
+          // The live record wins for cwd/title when we still have one; the flag
+          // carries them for a session the board has since pruned.
+          const session = sessions.get(sessionId);
+          const cwd = (session && session.cwd) || flag.cwd || null;
+          const title = (session && session.title) || flag.name || null;
+          result = terminal.reopenSession(sessionId, cwd, title);
+          if (result && result.ok) {
+            const remaining = flags.filter((f) => f.sessionId !== sessionId);
+            const written = writeResumeFlags(remaining);
+            result.unflagged = written.ok;
+            result.persisted = written.persisted;
+            result.remaining = remaining.length;
+          }
+        }
+      } catch (error) {
+        result = { ok: false, error: String(error) };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(result));
+    });
+    return;
+  }
+
+  // Drop a flag without resuming ("never mind, I am done with that one").
+  if (req.method === 'POST' && url === '/unflag-resume') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 5_000_000) req.destroy(); // guard against runaway payloads
+    });
+    req.on('end', () => {
+      let result;
+      try {
+        const payload = JSON.parse(body || '{}');
+        const sessionId = String(payload.sessionId || '');
+        const flags = readResumeFlags();
+        const remaining = flags.filter((f) => f.sessionId !== sessionId);
+        if (!sessionId) {
+          result = { ok: false, error: 'No session given' };
+        } else if (remaining.length === flags.length) {
+          result = { ok: false, error: 'That session is not flagged for resume.' };
+        } else {
+          const written = writeResumeFlags(remaining);
+          result = { ok: written.ok, persisted: written.persisted, remaining: remaining.length };
+        }
+      } catch (error) {
+        result = { ok: false, error: String(error) };
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(result));

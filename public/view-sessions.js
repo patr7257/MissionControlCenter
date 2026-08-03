@@ -267,6 +267,7 @@
           '<div class="sc-title"></div>' +
           '<div class="sc-where"></div>' +
         '</div>' +
+        '<div class="sc-ring sc-runring lo" title="Minutes this session has been running (full circle at 180)"><div><b></b><span>MIN</span></div></div>' +
         '<div class="sc-ring" style="display:none"><div><b></b><span>CTX</span></div></div>' +
       '</div>' +
       '<div class="sc-prompt"></div>' +
@@ -289,8 +290,12 @@
       stLabel: el.querySelector('.sc-st-label'),
       title: el.querySelector('.sc-title'),
       where: el.querySelector('.sc-where'),
-      ring: el.querySelector('.sc-ring'),
-      ringPct: el.querySelector('.sc-ring b'),
+      // querySelectorAll order matters here: the runtime ring is rendered first,
+      // so .sc-ring alone would match IT rather than the context ring.
+      runRing: el.querySelector('.sc-runring'),
+      runVal: el.querySelector('.sc-runring b'),
+      ring: el.querySelector('.sc-ring:not(.sc-runring)'),
+      ringPct: el.querySelector('.sc-ring:not(.sc-runring) b'),
       prompt: el.querySelector('.sc-prompt'),
       time: el.querySelector('.sc-time'),
       model: el.querySelector('.sc-model'),
@@ -302,6 +307,7 @@
       reopen: el.querySelector('.sc-reopen'),
       _status: null, _isActive: null, _title: null, _where: null, _prompt: null,
       _model: null, _badge: null, _ctxPct: undefined, _ctxSev: null, _closed: null, _editorOpen: null,
+      _runMin: undefined, _runSev: null, _startedAt: null, _runFrozenAt: null,
       _id: s.id
     };
     el.addEventListener('click', function () { focusCard(c); });
@@ -700,8 +706,55 @@
       c.codeClose.style.display = editorOpen ? '' : 'none';
       c._editorOpen = editorOpen;
     }
+    // Runtime: remembered on the card so the per-second tick can advance the ring
+    // without waiting for the next server push. A closed session freezes at its
+    // last activity instead of counting up forever.
+    c._startedAt = s.startedAt || null;
+    c._runFrozenAt = isActive ? null : (s.lastActivityAt || null);
+    paintRunRing(c);
     c.time.textContent = fmtRelative(s.lastActivityAt);
     c.el.setAttribute('data-last-activity', s.lastActivityAt || '');
+  }
+
+  // ---- Session runtime ring -----------------------------------------------
+  // Same shape as the context ring on purpose: it is the one gauge on the card
+  // that already reads at a glance. The scale is minutes, full circle at
+  // RUN_FULL_MIN (300, i.e. the same 5 hours as the quota window, so the ring and
+  // the bar above it measure the same span), and it reuses the shared lo/mid/hi
+  // severity ramp: amber at 60% (180 min, the mark long sessions actually reach)
+  // and red at 85% (255 min). Past 300 the arc stays full and the number keeps
+  // counting, since "how far over" is the useful part.
+  //
+  // NOTE the severity class goes on the RING here, not on the card the way the
+  // context ring's does. Two rings on one card cannot both inherit --sev from the
+  // card, and .lo/.mid/.hi only set that variable, so they work on any element.
+  var RUN_FULL_MIN = 300;
+  function paintRunRing(c) {
+    if (!c.runRing) return;
+    if (!c._startedAt) {
+      if (c.runRing.style.display !== 'none') c.runRing.style.display = 'none';
+      return;
+    }
+    if (c.runRing.style.display === 'none') c.runRing.style.display = '';
+    var end = c._runFrozenAt || Date.now();
+    var mins = Math.max(0, Math.floor((end - c._startedAt) / 60000));
+    var ratio = (mins / RUN_FULL_MIN) * 100;
+    var pct = Math.max(0, Math.min(100, Math.round(ratio)));
+    // Severity comes from the UNROUNDED ratio so the thresholds land on exact
+    // minutes: rounding first made 179 min report 60% and turn amber a minute
+    // early, which is the kind of off-by-one nobody would ever trust again.
+    var sev = sevClass(Math.min(100, ratio));
+    if (c._runSev !== sev) {
+      if (c._runSev) c.runRing.classList.remove(c._runSev);
+      c.runRing.classList.add(sev);
+      c._runSev = sev;
+    }
+    if (c._runMin !== mins) {
+      c.runRing.style.setProperty('--pct', pct);
+      c.runVal.textContent = mins;
+      c.runRing.setAttribute('title', 'Running for ' + mins + ' min (full circle at ' + RUN_FULL_MIN + ')');
+      c._runMin = mins;
+    }
   }
 
   function syncAll() {
@@ -1004,6 +1057,156 @@
     });
   }
 
+  // ---- Resume flagged sessions. The /resume-later skill writes the flag file
+  // from inside the session being flagged; this only reads it and acts on it.
+  // Resuming clears the flag server side, and only after the reattach is known to
+  // have launched, so a refused resume keeps the reminder. ----
+  var resumeFlags = [];
+  function refreshResumeFlags() {
+    return fetch('/resume-flags').then(function (res) { return res.json(); }).then(function (data) {
+      resumeFlags = (data && data.flags) || [];
+      paintResumeCount();
+      return resumeFlags;
+    }).catch(function () { return resumeFlags; });
+  }
+  function paintResumeCount() {
+    var badge = document.getElementById('resumeCount');
+    if (!badge) return;
+    var n = resumeFlags.length;
+    badge.textContent = n;
+    badge.style.display = n > 0 ? '' : 'none';
+  }
+  function renderResumeList() {
+    var host = document.getElementById('resumeList');
+    var empty = document.getElementById('resumeEmpty');
+    if (!host) return;
+    host.innerHTML = '';
+    if (empty) empty.style.display = resumeFlags.length ? 'none' : '';
+    resumeFlags.forEach(function (f) {
+      var row = document.createElement('div');
+      row.className = 'resume-row';
+      var left = document.createElement('div');
+      left.style.minWidth = '0';
+      var name = document.createElement('div');
+      name.className = 'rr-name';
+      // textContent, never innerHTML: the name comes from a session title the
+      // developer typed and a file this app does not own.
+      name.textContent = f.name || f.project || f.sessionId;
+      var meta = document.createElement('div');
+      meta.className = 'rr-meta';
+      var bits = [];
+      if (f.project && f.name) bits.push(f.project);
+      if (f.flaggedAt) bits.push('flagged ' + fmtRelative(f.flaggedAt));
+      if (f.note) bits.push(f.note);
+      if (!f.known) bits.push('not on the board any more');
+      meta.textContent = bits.join('  /  ');
+      left.appendChild(name);
+      left.appendChild(meta);
+      var acts = document.createElement('span');
+      acts.className = 'rr-acts';
+      var go = document.createElement('button');
+      go.type = 'button';
+      go.className = 'gobtn resumebtn';
+      go.textContent = 'Resume';
+      go.addEventListener('click', function () { doResumeFlagged(f, go); });
+      var drop = document.createElement('button');
+      drop.type = 'button';
+      drop.className = 'ghostbtn';
+      drop.textContent = 'Unflag';
+      drop.addEventListener('click', function () { doUnflag(f, drop); });
+      acts.appendChild(go);
+      acts.appendChild(drop);
+      row.appendChild(left);
+      row.appendChild(acts);
+      host.appendChild(row);
+    });
+    var pathEl = document.getElementById('resumePath');
+    if (pathEl) {
+      pathEl.textContent = resumeFlags.length
+        ? (resumeFlags.length + (resumeFlags.length === 1 ? ' session flagged' : ' sessions flagged'))
+        : '';
+    }
+  }
+  function doResumeFlagged(f, btn) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    fetch('/resume-flagged', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: f.sessionId })
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (!data || data.ok === false) {
+        showToast((data && data.error) ? String(data.error) : 'Could not resume that session.');
+        btn.disabled = false;
+        return;
+      }
+      showToast('Resuming ' + (f.name || 'that session') + ' in a new tab.');
+      return refreshResumeFlags().then(function () {
+        renderResumeList();
+        if (!resumeFlags.length) closeResumePopup();
+      });
+    }).catch(function () {
+      showToast('Could not reach the server to resume that session.');
+      btn.disabled = false;
+    });
+  }
+  function doUnflag(f, btn) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    fetch('/unflag-resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: f.sessionId })
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (!data || data.ok === false) showToast((data && data.error) ? String(data.error) : 'Could not unflag that session.');
+      return refreshResumeFlags().then(function () {
+        renderResumeList();
+        if (!resumeFlags.length) closeResumePopup();
+      });
+    }).catch(function () {
+      showToast('Could not reach the server.');
+      btn.disabled = false;
+    });
+  }
+  function openResumePopup() {
+    var backdrop = document.getElementById('resumeBackdrop');
+    if (!backdrop) return;
+    // Always re-read: the skill may have flagged something since the last look.
+    refreshResumeFlags().then(function () {
+      renderResumeList();
+      backdrop.style.display = 'flex';
+      var btn = document.getElementById('resumeOpenBtn');
+      if (btn) btn.setAttribute('aria-expanded', 'true');
+      var first = backdrop.querySelector('.resume-row .gobtn') || document.getElementById('resumeCloseBtn');
+      if (first) first.focus();
+      document.addEventListener('keydown', onResumeKeydown);
+    });
+  }
+  function closeResumePopup() {
+    var backdrop = document.getElementById('resumeBackdrop');
+    if (backdrop) backdrop.style.display = 'none';
+    document.removeEventListener('keydown', onResumeKeydown);
+    var btn = document.getElementById('resumeOpenBtn');
+    if (btn) { btn.setAttribute('aria-expanded', 'false'); btn.focus(); }
+  }
+  function onResumeKeydown(e) { if (e.key === 'Escape') { e.preventDefault(); closeResumePopup(); } }
+  function initResumePopup() {
+    var btn = document.getElementById('resumeOpenBtn');
+    if (!btn || btn._wired) return;
+    btn._wired = true;
+    btn.addEventListener('click', openResumePopup);
+    var closeBtn = document.getElementById('resumeCloseBtn');
+    if (closeBtn) closeBtn.addEventListener('click', closeResumePopup);
+    var backdrop = document.getElementById('resumeBackdrop');
+    if (backdrop) {
+      backdrop.addEventListener('click', function (e) { if (e.target === backdrop) closeResumePopup(); });
+    }
+    refreshResumeFlags();
+    // The flag file is written by another process, so the count is polled. 15s is
+    // plenty for a "remind me later" list and costs one local read.
+    setInterval(refreshResumeFlags, 15000);
+  }
+
   // ---- New session popup chrome (Esc closes, backdrop click closes, focus
   // moves to Name on open and back to the opener button on close). The popup
   // markup lives outside #viewSessions in index.html (a fixed backdrop), so
@@ -1060,6 +1263,17 @@
   var usageRefs = null;
   var STALE_MS = 5 * 60 * 1000;
   function sevClass(pct) { return pct >= 85 ? 'hi' : pct >= 60 ? 'mid' : 'lo'; }
+  // The 7 day window resets days out, so a bare clock time would be ambiguous:
+  // prefix the weekday unless it lands today. Day names are a literal list rather
+  // than toLocaleDateString so the output cannot shift with the machine locale.
+  var DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  function fmtDayClock(ts) {
+    if (!ts) return '';
+    var d = new Date(ts);
+    var now = new Date();
+    var sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    return (sameDay ? '' : DAY_NAMES[d.getDay()] + ' ') + fmtClock(ts);
+  }
   function fmtClock(ts) {
     if (!ts) return '';
     var d = new Date(ts);
@@ -1070,17 +1284,74 @@
     if (usageRefs) return usageRefs;
     var host = document.getElementById('usageMeters');
     if (!host) return null;
+    // Both windows are bars now. The 5 hour one is the full-width bar above the
+    // filters (#quotaBar in index.html), because it is the number worth steering
+    // by; the 7 day one is this compact bar, which stretches across whatever
+    // header space is left between the Resume button and the icon buttons. Neither
+    // is a ring any more: a 40px ring gave the most consequential number on screen
+    // no more weight than anything else in the header.
     host.innerHTML =
-      '<div class="g" id="meterFive" style="display:none"><span class="ring"><i></i></span><span class="lb">5 hour<em></em></span></div>' +
-      '<div class="g" id="meterSeven" style="display:none"><span class="ring"><i></i></span><span class="lb">7 day<em></em></span></div>';
+      '<div class="m7" id="meterSeven" style="display:none">' +
+        '<b>7 day</b>' +
+        '<span class="m7-track"><span class="m7-fill"></span></span>' +
+        '<span class="m7-val"></span>' +
+        '<span class="m7-reset"></span>' +
+      '</div>';
     usageRefs = {
       host: host,
-      five: { wrap: document.getElementById('meterFive'), ring: host.querySelector('#meterFive .ring'), val: host.querySelector('#meterFive i'), note: host.querySelector('#meterFive em'), _sev: null, _pct: undefined, _note: null },
-      seven: { wrap: document.getElementById('meterSeven'), ring: host.querySelector('#meterSeven .ring'), val: host.querySelector('#meterSeven i'), note: host.querySelector('#meterSeven em'), _sev: null, _pct: undefined, _note: null }
+      seven: {
+        wrap: document.getElementById('meterSeven'),
+        fill: host.querySelector('.m7-fill'),
+        val: host.querySelector('.m7-val'),
+        reset: host.querySelector('.m7-reset'),
+        _sev: null, _pct: undefined, _reset: null
+      },
+      bar: {
+        wrap: document.getElementById('quotaBar'),
+        fill: document.getElementById('quotaFill'),
+        pct: document.getElementById('quotaPct'),
+        note: document.getElementById('quotaNote'),
+        resetStat: document.getElementById('quotaResetStat'),
+        age: document.getElementById('quotaAge'),
+        _sev: null, _pct: undefined, _note: null, _age: null
+      }
     };
     return usageRefs;
   }
-  function renderUsageWindow(ref, data, stale, freshNote, ageText) {
+
+  // The 7 day window as a header bar. Quieter than the 5 hour bar on purpose: it
+  // moves slowly and is reference, not something to steer by.
+  function renderSevenBar(ref, data, stale, resetText) {
+    if (!ref.wrap) return;
+    if (!data || data.pct == null) {
+      if (ref.wrap.style.display !== 'none') ref.wrap.style.display = 'none';
+      ref._sev = null; ref._pct = undefined;
+      return;
+    }
+    if (ref.wrap.style.display === 'none') ref.wrap.style.display = '';
+    var pct = Math.max(0, Math.min(100, Math.round(data.pct)));
+    var sev = sevClass(pct);
+    if (ref._sev !== sev) {
+      if (ref._sev) ref.wrap.classList.remove(ref._sev);
+      ref.wrap.classList.add(sev);
+      ref._sev = sev;
+    }
+    if (ref._pct !== pct) {
+      ref.fill.style.width = pct + '%';
+      ref.val.textContent = pct + '%';
+      ref._pct = pct;
+    }
+    if (ref.reset && ref._reset !== resetText) {
+      ref.reset.textContent = resetText ? ('resets ' + resetText) : '';
+      ref._reset = resetText;
+    }
+    ref.wrap.classList.toggle('stale', !!stale);
+  }
+
+  // The bar twin of renderUsageWindow: same dirty-checking and the same shared
+  // severity ramp, a horizontal track instead of a ring.
+  function renderQuotaBar(ref, data, stale, freshNote, ageText) {
+    if (!ref.wrap) return;
     if (!data || data.pct == null) {
       if (ref.wrap.style.display !== 'none') ref.wrap.style.display = 'none';
       ref._sev = null; ref._pct = undefined; ref._note = null;
@@ -1095,20 +1366,29 @@
       ref._sev = sev;
     }
     if (ref._pct !== pct) {
-      ref.ring.style.setProperty('--pct', pct);
-      ref.val.textContent = pct;
+      ref.fill.style.width = pct + '%';
+      ref.pct.textContent = pct + '%';
       ref._pct = pct;
     }
-    var note = stale ? (ageText || 'stale') : (freshNote || '');
-    if (ref._note !== note) { ref.note.textContent = note; ref._note = note; }
+    ref.wrap.classList.toggle('stale', !!stale);
+    // Bare values: the "resets" and "updated" words are static labels in the
+    // markup now, so all three stats share one typography.
+    if (ref._note !== freshNote) {
+      ref.note.textContent = freshNote || '';
+      // No reset time reported (the 7 day window has none): drop the whole stat
+      // rather than leaving a dangling label.
+      if (ref.resetStat) ref.resetStat.style.display = freshNote ? '' : 'none';
+      ref._note = freshNote;
+    }
+    if (ref.age && ref._age !== ageText) { ref.age.textContent = ageText || ''; ref._age = ageText; }
   }
   function updateUsageMeters() {
     var refs = ensureUsageDom();
     if (!refs) return;
     var usage = Store.usage;
     if (!usage) {
-      refs.five.wrap.style.display = 'none';
       refs.seven.wrap.style.display = 'none';
+      if (refs.bar.wrap) refs.bar.wrap.style.display = 'none';
       refs.host.classList.remove('stale');
       return;
     }
@@ -1118,13 +1398,17 @@
     var stale = !!(usage.at && (Date.now() - usage.at) > STALE_MS);
     refs.host.classList.toggle('stale', stale);
     var ageText = usage.at ? fmtRelative(usage.at) : '';
-    var fiveNote = (usage.fiveHour && usage.fiveHour.resetsAt) ? ('resets ' + fmtClock(usage.fiveHour.resetsAt)) : '';
-    renderUsageWindow(refs.five, usage.fiveHour, stale, fiveNote, ageText);
-    renderUsageWindow(refs.seven, usage.sevenDay, stale, 'rolling', ageText);
+    var fiveNote = (usage.fiveHour && usage.fiveHour.resetsAt) ? fmtClock(usage.fiveHour.resetsAt) : '';
+    renderQuotaBar(refs.bar, usage.fiveHour, stale, fiveNote, ageText);
+    var sevenReset = (usage.sevenDay && usage.sevenDay.resetsAt) ? fmtDayClock(usage.sevenDay.resetsAt) : '';
+    renderSevenBar(refs.seven, usage.sevenDay, stale, sevenReset);
   }
 
   function tick() {
     cards.forEach(function (c) {
+      // The runtime ring advances on its own clock, so it keeps moving between
+      // server pushes (an idle session gets no events for minutes at a time).
+      paintRunRing(c);
       var raw = c.el.getAttribute('data-last-activity');
       if (!raw) return;
       c.time.textContent = fmtRelative(parseInt(raw, 10));
@@ -1138,6 +1422,7 @@
   Store.onUsage(updateUsageMeters);
   initNewSessionPopup();
   initConfirmPopup();
+  initResumePopup();
   // Registered once at load, not in activate(): a session can end while the detail
   // view is on screen, and the offer must still reach the developer.
   Store.onEditorPrompt(queueEditorPrompt);
@@ -1156,6 +1441,7 @@
     sessionsChanged: function () { if (Store.getActiveId() === 'sessions') { populateRepoFilter(); syncAll(); } },
     setStateFilter: setStateFilter,
     openNewSession: openNewSessionPopup,
+    openResume: openResumePopup,
     // Exposed for scripts/render-check.mjs, which drives the end-of-session offer
     // without needing a real session to end.
     editorPrompt: queueEditorPrompt

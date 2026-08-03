@@ -189,6 +189,32 @@ const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'cmc-render-'));
 fs.mkdirSync(path.join(TMP_HOME, 'repos', '2-ZRM', 'customers', 'a-very-long-customer-name', 'their-webshop-frontend'), { recursive: true });
 fs.mkdirSync(path.join(TMP_HOME, 'repos', '1-Personal', 'MissionControlCenter'), { recursive: true });
 
+// Two sessions flagged for later, written the way the /resume-later skill writes
+// them: a plain file in the state dir that the server reads fresh. Seeded BEFORE
+// the server boots so the very first /resume-flags call sees them.
+fs.mkdirSync(path.join(TMP_HOME, '.claude', 'agent-fleet-monitor'), { recursive: true });
+fs.writeFileSync(
+  path.join(TMP_HOME, '.claude', 'agent-fleet-monitor', 'resume-flags.json'),
+  JSON.stringify([
+    {
+      sessionId: 'render-1',
+      name: 'A Deliberately Very Long Session Name To Force Ellipsis',
+      cwd: path.join(TMP_HOME, 'repos', '1-Personal', 'MissionControlCenter'),
+      project: 'MissionControlCenter',
+      note: 'paused to save tokens until 16:00',
+      flaggedAt: Date.now() - 12 * 60000,
+    },
+    {
+      sessionId: 'pruned-session-id',
+      name: 'Samberg VIBE Extension',
+      cwd: path.join(TMP_HOME, 'repos', '2-ZRM', 'customers'),
+      project: 'customers',
+      note: null,
+      flaggedAt: Date.now() - 95 * 60000,
+    },
+  ])
+);
+
 const server = spawn(process.execPath, [path.join(REPO, 'server.mjs'), '--port', String(PORT)], {
   env: { ...process.env, HOME: TMP_HOME, USERPROFILE: TMP_HOME, CMC_DRY_RUN: '1', CMC_REGISTRY_POLL_MS: '400' },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -267,11 +293,17 @@ try {
       cardClasses: card.className,
       title: q('.sc-title'),
       where: q('.sc-where'),
-      ring: card.querySelector('.sc-ring') ? card.querySelector('.sc-ring').textContent.replace(/\\s+/g, ' ').trim() : null,
+      // :not(.sc-runring) matters: the runtime ring renders FIRST, so a bare
+      // .sc-ring selector now matches that one instead of the context ring.
+      ring: card.querySelector('.sc-ring:not(.sc-runring)') ? card.querySelector('.sc-ring:not(.sc-runring)').textContent.replace(/\\s+/g, ' ').trim() : null,
+      runRing: card.querySelector('.sc-runring') ? card.querySelector('.sc-runring').textContent.replace(/\\s+/g, ' ').trim() : null,
       actionLabels: Array.prototype.map.call(card.querySelectorAll('button'), function (b) { return b.textContent.trim(); }),
       hasNewSessionBtn: !!document.getElementById('newSessionOpenBtn') || !!document.getElementById('newSessionBtn'),
       hasRepoBar: !!document.querySelector('.new-session-bar'),
       usageText: (document.getElementById('usageMeters') || {}).innerText || '',
+      quotaBarText: (document.getElementById('quotaBar') || {}).innerText || '',
+      quotaFillWidth: (function () { var f = document.getElementById('quotaFill'); return f ? f.style.width : null; })(),
+      quotaBarClass: (document.getElementById('quotaBar') || {}).className || '',
       stateOptions: Array.prototype.map.call(document.querySelectorAll('#fltState option'), function (o) { return o.value; }),
       timeOptions: Array.prototype.map.call(document.querySelectorAll('#fltTime option'), function (o) { return o.value; }),
       attentionVisible: (function () { var a = document.getElementById('attention'); return !!a && a.style.display !== 'none'; })(),
@@ -290,7 +322,18 @@ try {
   check('Open in VS Code action present', facts.actionLabels.indexOf('VS Code') !== -1, JSON.stringify(facts.actionLabels));
   check('New session button exists', facts.hasNewSessionBtn);
   check('old always-on repo bar is gone', !facts.hasRepoBar);
-  check('quota meters rendered', /5/.test(facts.usageText) && /7/.test(facts.usageText), JSON.stringify(facts.usageText));
+  // The 5 hour window is a full-width bar now and only the 7 day ring is left in
+  // the header, so the old "5 and 7 both appear up there" check would pass for
+  // the wrong reason.
+  check('the 7 day window is in the header, the 5 hour one is not',
+    /7\s*day/i.test(facts.usageText) && !/5\s*hour/i.test(facts.usageText), JSON.stringify(facts.usageText));
+  check('5 hour quota renders as a bar with its percentage and reset time',
+    /5 hour limit/i.test(facts.quotaBarText) && /42%/.test(facts.quotaBarText) && /resets/i.test(facts.quotaBarText),
+    JSON.stringify(facts.quotaBarText));
+  check('the quota bar fill is sized to the reading and takes the shared severity ramp',
+    facts.quotaFillWidth === '42%' && /\blo\b/.test(facts.quotaBarClass),
+    facts.quotaFillWidth + ' | ' + facts.quotaBarClass);
+  check('the card carries a runtime ring labelled MIN', /MIN/.test(String(facts.runRing)), String(facts.runRing));
   check('Show filter is exactly All/Active/Closed, needs-input pulled out into the segmented control',
     JSON.stringify(facts.stateOptions) === JSON.stringify(['all', 'active', 'closed']), JSON.stringify(facts.stateOptions));
   check('7 day time filter option exists', facts.timeOptions.some(function (v) { return /week|7/.test(v); }), JSON.stringify(facts.timeOptions));
@@ -1108,6 +1151,151 @@ try {
     endPrompt.calls.length === 1 && endPrompt.calls[0].sessionId === 'render-2', JSON.stringify(endPrompt.calls));
   check('the dialog is gone once the queue is empty', endPrompt.third.open === false, JSON.stringify(endPrompt.third));
 
+  // ---- Runtime ring thresholds. Driven by ageing the session's own startedAt in
+  // the store and re-rendering through the REAL sessionsChanged path, so this
+  // exercises paintRunRing rather than a copy of its arithmetic. The scale is
+  // minutes with a full circle at 180, and the ramp must warn BEFORE 180: amber at
+  // 60% (108 min) and red at 85% (153 min).
+  const runRing = await cdp.eval(`(function () {
+    var out = [];
+    var s = Store.sessions.get('render-1');
+    [[10,'lo'],[179,'lo'],[180,'mid'],[254,'mid'],[255,'hi'],[299,'hi'],[340,'hi']].forEach(function (pair) {
+      s.startedAt = Date.now() - pair[0] * 60000;
+      window.ViewSessions.sessionsChanged();
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.session-card'));
+      var card = cards.find(function (c) {
+        var t = c.querySelector('.sc-title');
+        return t && t.textContent.indexOf('A Deliberately') !== -1;
+      });
+      var ring = card.querySelector('.sc-runring');
+      out.push({
+        min: pair[0], want: pair[1],
+        shown: ring.querySelector('b').textContent,
+        cls: /\\b(lo|mid|hi)\\b/.exec(ring.className),
+        pct: ring.style.getPropertyValue('--pct')
+      });
+    });
+    return out;
+  })()`);
+  const ramp = runRing.map((r) => `${r.min}min=${r.cls && r.cls[0]}/${r.shown}/${r.pct}`).join(' ');
+  check('the runtime ring counts MINUTES, not a percentage',
+    runRing.every((r) => r.shown === String(r.min)), ramp);
+  check('the runtime ramp warns before 300: amber from 180 min, red from 255 min',
+    runRing.every((r) => r.cls && r.cls[0] === r.want), ramp);
+  check('the runtime arc fills proportionally and clamps at 300 min',
+    runRing.find((r) => r.min === 10).pct === '3' && runRing.find((r) => r.min === 299).pct === '100' &&
+      runRing.find((r) => r.min === 340).pct === '100', ramp);
+  check('a session past 300 min keeps counting rather than freezing at 300',
+    runRing.find((r) => r.min === 340).shown === '340', ramp);
+
+  // ---- Resume picker. The flag file is seeded above, so this exercises the real
+  // read path: the amber button counts them, the popup lists them newest-first
+  // with a name the developer typed, and a flag whose session has been pruned from
+  // the board is still offered (resuming needs only the id).
+  const resumePicker = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch;
+      var calls = [];
+      window.fetch = function (url, opts) {
+        var u = String(url);
+        if (u.indexOf('/resume-flagged') !== -1) {
+          calls.push(opts && opts.body ? JSON.parse(opts.body) : null);
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, mode: 'reattached', unflagged: true, remaining: 1 }); } });
+        }
+        return originalFetch(url, opts);
+      };
+      document.getElementById('resumeOpenBtn').click();
+      setTimeout(function () {
+        var bd = document.getElementById('resumeBackdrop');
+        var rows = Array.prototype.slice.call(document.querySelectorAll('.resume-row'));
+        var read = {
+          badge: document.getElementById('resumeCount').textContent,
+          badgeShown: getComputedStyle(document.getElementById('resumeCount')).display !== 'none',
+          open: getComputedStyle(bd).display !== 'none',
+          rowCount: rows.length,
+          names: rows.map(function (r) { return r.querySelector('.rr-name').textContent; }),
+          metas: rows.map(function (r) { return r.querySelector('.rr-meta').textContent; }),
+          emptyShown: getComputedStyle(document.getElementById('resumeEmpty')).display !== 'none',
+          focused: document.activeElement ? document.activeElement.textContent : null
+        };
+        rows[0].querySelector('.gobtn').click();
+        setTimeout(function () {
+          window.fetch = originalFetch;
+          read.calls = calls;
+          read.closedAfterEsc = (function () {
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            return getComputedStyle(bd).display === 'none';
+          })();
+          resolve(read);
+        }, 300);
+      }, 400);
+    });
+  })()`);
+  check('the amber Resume session button counts the flagged sessions',
+    resumePicker.badge === '2' && resumePicker.badgeShown === true, JSON.stringify(resumePicker));
+  check('the resume picker opens and lists every flagged session',
+    resumePicker.open === true && resumePicker.rowCount === 2 && resumePicker.emptyShown === false,
+    JSON.stringify(resumePicker));
+  check('a flagged session shows the name the developer gave it',
+    resumePicker.names.indexOf('Samberg VIBE Extension') !== -1, JSON.stringify(resumePicker.names));
+  check('the picker shows when it was flagged, and the note',
+    /flagged 12m ago/.test(resumePicker.metas.join(' ')) && /save tokens/.test(resumePicker.metas.join(' ')),
+    JSON.stringify(resumePicker.metas));
+  check('a flag whose session left the board is still offered, and says so',
+    /not on the board any more/.test(resumePicker.metas.join(' ')), JSON.stringify(resumePicker.metas));
+  check('Resume POSTs /resume-flagged for that session id',
+    resumePicker.calls.length === 1 && resumePicker.calls[0].sessionId === 'render-1', JSON.stringify(resumePicker.calls));
+  check('Esc closes the resume picker', resumePicker.closedAfterEsc === true, JSON.stringify(resumePicker));
+
+  // ---- The 7 day bar claims the header gap between the Resume button and the
+  // icon buttons, and must never push those off the row. Geometry, because that is
+  // the only thing that proves "fills the space it has left".
+  const sevenBar = await cdp.eval(`(function () {
+    var r = function (sel) { var e = document.querySelector(sel); if (!e) return null; var b = e.getBoundingClientRect(); return { left: Math.round(b.left), right: Math.round(b.right), w: Math.round(b.width), top: Math.round(b.top), h: Math.round(b.height) }; };
+    return {
+      resume: r('#resumeOpenBtn'), bar: r('.m7'), track: r('.m7-track'), actions: r('.hdr-actions'),
+      isRing: !!document.querySelector('#usageMeters .ring'),
+      val: (document.querySelector('.m7-val') || {}).textContent || '',
+      reset: (document.querySelector('.m7-reset') || {}).textContent || '',
+      pageScrollW: document.documentElement.scrollWidth, innerW: window.innerWidth
+    };
+  })()`);
+  check('the 7 day window is a bar, not a ring any more', sevenBar.isRing === false, JSON.stringify(sevenBar.isRing));
+  check('the 7 day bar sits between the Resume button and the icon buttons',
+    sevenBar.bar.left >= sevenBar.resume.right && sevenBar.bar.right <= sevenBar.actions.left + 1,
+    JSON.stringify(sevenBar));
+  check('the 7 day bar actually fills that gap rather than hugging one side',
+    sevenBar.track.w > 120 && (sevenBar.actions.left - sevenBar.resume.right) - sevenBar.bar.w < 40,
+    JSON.stringify(sevenBar));
+  check('adding the 7 day bar causes no page-level horizontal scroll',
+    sevenBar.pageScrollW <= sevenBar.innerW + 1, JSON.stringify(sevenBar));
+  check('the 7 day bar still reports its percentage', /%$/.test(sevenBar.val.trim()), sevenBar.val);
+  // A 7 day reset is days out, so a bare clock time would be ambiguous: the
+  // weekday is prefixed unless it lands today.
+  check('the 7 day bar says when it resets, with a weekday since it is days out',
+    /^resets (\w{3} )?\d\d:\d\d$/.test(sevenBar.reset.trim()), sevenBar.reset);
+
+  // The quota bar's reading age is always visible, not only once stale: a
+  // percentage with no age reads as live when the feed may be minutes behind.
+  const quotaAge = await cdp.eval(`(function () {
+    var stats = Array.prototype.map.call(document.querySelectorAll('#quotaBar .qstat'), function (s) {
+      return {
+        label: s.querySelector('b').textContent,
+        value: s.querySelector('.qval').textContent,
+        labelSize: getComputedStyle(s.querySelector('b')).fontSize,
+        valueSize: getComputedStyle(s.querySelector('.qval')).fontSize
+      };
+    });
+    return { stats: stats, age: document.getElementById('quotaAge').textContent, note: document.getElementById('quotaNote').textContent };
+  })()`);
+  check('the quota bar shows the reset time and how old the reading is',
+    /^\d\d:\d\d$/.test(quotaAge.note.trim()) && /ago|just now/.test(quotaAge.age), JSON.stringify(quotaAge));
+  // Every piece of the row is ONE size, labels and values alike: an oversized
+  // value read as a headline with fine print bolted onto it.
+  const quotaSizes = quotaAge.stats.flatMap((s) => [s.labelSize, s.valueSize]);
+  check('the whole quota stat row is one type size, labels and values alike',
+    quotaAge.stats.length === 3 && new Set(quotaSizes).size === 1, JSON.stringify(quotaAge.stats));
+
   const errs = cdp.jsErrors();
   check('no JS or console errors on the board', errs.length === 0, errs.slice(0, 5).join(' | '));
 
@@ -1174,6 +1362,17 @@ try {
     const endPath = SHOT.replace(/(\.png)?$/i, '') + '-session-ended.png';
     fs.writeFileSync(endPath, Buffer.from(endShot.data, 'base64'));
     process.stdout.write('screenshot: ' + endPath + '\n');
+    // Sixth shot: the resume picker, populated from the seeded flag file.
+    await cdp.eval(`(function () {
+      document.getElementById('confirmCancelBtn').click();
+      window.ViewSessions.openResume();
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 500));
+    const resShot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    const resPath = SHOT.replace(/(\.png)?$/i, '') + '-resume.png';
+    fs.writeFileSync(resPath, Buffer.from(resShot.data, 'base64'));
+    process.stdout.write('screenshot: ' + resPath + '\n');
   }
 
   process.stdout.write(failures === 0 ? '\nRESULT: ALL PASS\n' : `\nRESULT: ${failures} FAILED\n`);
