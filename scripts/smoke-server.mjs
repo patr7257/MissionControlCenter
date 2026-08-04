@@ -917,6 +917,49 @@ try {
   check('unflagging something that was never flagged reports it rather than pretending it worked',
     unflagUnknown && unflagUnknown.ok === false && /not flagged/i.test(String(unflagUnknown.error)));
 
+  // ---- POST /flag-resume: the card's Resume later button, i.e. the in-app twin of
+  // the /resume-later skill. Both flags from the fixture are still on disk (the
+  // resume and unflag above computed their removals under CMC_DRY_RUN without
+  // writing), so the counts below start from 2.
+  const flaggedNew = await (await fetch(`${BASE}/flag-resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-1' }),
+  })).json();
+  check('POST /flag-resume flags a session the board knows',
+    flaggedNew && flaggedNew.ok === true && flaggedNew.reflagged === false && flaggedNew.total === 3);
+  // Same dry-run honesty as /unflag-resume and /resume-flagged: ok says the request
+  // was handled, persisted says the file really changed. A scratch server must
+  // never be able to write into the developer's real reminders.
+  check('a dry-run flag reports that the flag file was NOT actually written',
+    flaggedNew && flaggedNew.persisted === false);
+  const flaggedAgain = await (await fetch(`${BASE}/flag-resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-open' }),
+  })).json();
+  check('re-flagging an already flagged session updates it in place instead of duplicating it',
+    flaggedAgain && flaggedAgain.ok === true && flaggedAgain.reflagged === true && flaggedAgain.total === 2);
+  const flagUnknown = await (await fetch(`${BASE}/flag-resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'no-such-session-at-all' }),
+  })).json();
+  // A flag carries the cwd that becomes the reattached tab's working directory, so
+  // a session the server knows nothing about must be refused rather than flagged
+  // against a guessed folder.
+  check('POST /flag-resume refuses a session that is not on the board',
+    flagUnknown && flagUnknown.ok === false && /not on the board/i.test(String(flagUnknown.error)));
+  const flagNoId = await (await fetch(`${BASE}/flag-resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })).json();
+  check('POST /flag-resume with no session fails cleanly', flagNoId && flagNoId.ok === false);
+  const flagsAfter = await (await fetch(`${BASE}/resume-flags`)).json();
+  check('a dry-run flag really did not reach the file (GET still reports the original two)',
+    flagsAfter && Array.isArray(flagsAfter.flags) && flagsAfter.flags.length === 2);
+
   // ---- startedAt is a RUN start, not "when the server first noticed". The
   // registry is authoritative and wins over whatever created the session, which is
   // what makes the card's runtime ring meaningful (mtime made a five-hour session
@@ -979,6 +1022,26 @@ try {
     terminal.editorSpawnEnv(base);
     return base.ELECTRON_RUN_AS_NODE === '1';
   })());
+  // THE bug behind issue #33, and the reason this assertion exists at all:
+  // `windowsHide: true` is not just "no console window". Node maps it to libuv's
+  // UV_PROCESS_WINDOWS_HIDE, which sets STARTUPINFO.wShowWindow = SW_HIDE with
+  // STARTF_USESHOWWINDOW, and a GUI app honours that for its FIRST window. So a
+  // COLD VS Code start opened its window invisibly: the process ran, the folder
+  // loaded, and the button looked dead. Only the cold start was affected, because
+  // a warm instance creates the window itself, which is what made it read as
+  // intermittent. Measured by cold-starting Code.exe into a throwaway
+  // --user-data-dir and enumerating window handles: windowsHide true gave a
+  // hidden window, false a visible one, same folder.
+  const editorOpts = terminal.editorSpawnOptions({ ELECTRON_RUN_AS_NODE: '1', PATH: 'keep-me' });
+  check('terminal.mjs exports editorSpawnOptions', typeof terminal.editorSpawnOptions === 'function');
+  check('editorSpawnOptions never hides the window it is about to open (issue #33)',
+    editorOpts && editorOpts.windowsHide !== true, JSON.stringify(editorOpts && editorOpts.windowsHide));
+  check('editorSpawnOptions keeps detached, so the warm named-pipe handoff survives',
+    editorOpts && editorOpts.detached === true);
+  check('editorSpawnOptions never asks for a shell (a console flash and a quoting hazard)',
+    editorOpts && editorOpts.shell === false);
+  check('editorSpawnOptions carries the stripped env, so Code.exe cannot run as Node',
+    editorOpts && editorOpts.env && !('ELECTRON_RUN_AS_NODE' in editorOpts.env) && editorOpts.env.PATH === 'keep-me');
   check('isInsideReposRoot accepts a folder in the repos root and rejects a sibling',
     terminal.isInsideReposRoot(path.join(os.homedir(), 'repos', 'anything')) === true &&
       terminal.isInsideReposRoot(path.join(os.homedir(), 'repos-secret')) === false);

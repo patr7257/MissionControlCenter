@@ -217,7 +217,19 @@ with Ctrl+W, and is idempotent, since VS Code forwards the folder to a running i
 it. Failures come back as `{ ok:false, reason:'no-editor'|'bad-folder'|'outside-root'|'spawn-failed',
 error }` and the UI prints `error` verbatim.
 
-Four load-bearing details, three of them found only by really spawning it:
+Five load-bearing details, four of them found only by really spawning it:
+- **NEVER pass `windowsHide` here. It hides the WINDOW, not just a console** (fixed 2026-08-04,
+  issue #33, and this note previously said the opposite). Node maps `windowsHide: true` to libuv's
+  `UV_PROCESS_WINDOWS_HIDE`, which sets `STARTUPINFO.wShowWindow = SW_HIDE` together with
+  `STARTF_USESHOWWINDOW`, and a GUI app honours that for its FIRST window. So a COLD VS Code start
+  created its window invisibly: the process ran, the folder loaded, and the button looked completely
+  dead. Only the cold start was affected, because a warm instance creates the new window itself and
+  never saw our `STARTUPINFO`, which is why it read as intermittent ("it worked yesterday") rather
+  than broken. Measured by cold-starting `Code.exe` into a throwaway `--user-data-dir` and
+  enumerating window handles: hidden with the flag, visible without it, same folder. The same
+  enumeration found a real stranded window still alive and invisible nine hours after a click. The
+  options now live in the exported `editorSpawnOptions()` and `scripts/smoke-server.mjs` asserts the
+  flag never comes back.
 - **Never route this through `wt`.** A tab that ran `code .` and closed itself would shift every
   LATER tab down one while `managedTabs` kept its old positional `tabIndex`, so every later focus
   click would jump to the wrong tab. `scripts/smoke-server.mjs` asserts the command contains no `wt`,
@@ -232,10 +244,10 @@ Four load-bearing details, three of them found only by really spawning it:
 - **`detached: true` plus `unref()`.** A second `Code.exe` does not draw the window itself: it
   connects to the already-running instance over a named pipe, forwards the folder and exits. Being
   killed mid-handoff means nothing happens at all, which is exactly what a non-detached spawn from a
-  short-lived parent produced (measured: no window; detached opened it). Windows ignores
-  `CREATE_NO_WINDOW` (`windowsHide`) when `DETACHED_PROCESS` is set, which does not matter here
-  because `Code.exe` is a GUI-subsystem binary (PE subsystem 2, verified) and has no console either
-  way.
+  short-lived parent produced (measured: no window; detached opened it). There is no console to worry
+  about either way: `Code.exe` is a GUI-subsystem binary (PE subsystem 2, verified), and Windows
+  ignores `CREATE_NO_WINDOW` once `DETACHED_PROCESS` is set. That is the whole reason `windowsHide`
+  bought nothing while costing the bug above.
 - **Spawn `Code.exe`, never `code.cmd`.** Node refuses to spawn a `.cmd` without `shell: true`, and
   that shell is both a console flash and a quoting hazard. Resolution order: `CMC_VSCODE_EXE`
   (reported as an error when it points at nothing, never silently ignored), then `where code` mapped
@@ -353,15 +365,37 @@ For stopping a session on purpose ("back at 16:00") rather than finishing it.
   (never caches it) because another process owns the writes, so flagging shows up with no restart and
   works whether or not the app is running.
 - **Endpoints:** `GET /resume-flags` (enriched at read time with what the live board knows, so a
-  renamed session shows its current name), `POST /resume-flagged` (reattach AND clear the flag in ONE
-  call, clearing only after `reopenSession` reports success, so a refused reattach keeps the
-  reminder), `POST /unflag-resume` (drop it without resuming). Writes return `{ ok, persisted }` and
-  the endpoints report both: they differ under `CMC_DRY_RUN`, where the removal is computed but the
-  file is untouched, so a scratch server can never delete real reminders.
+  renamed session shows its current name), `POST /flag-resume` (flag from a card, see below),
+  `POST /resume-flagged` (reattach AND clear the flag in ONE call, clearing only after `reopenSession`
+  reports success, so a refused reattach keeps the reminder), `POST /unflag-resume` (drop it without
+  resuming). Writes return `{ ok, persisted }` and the endpoints report both: they differ under
+  `CMC_DRY_RUN`, where the change is computed but the file is untouched, so a scratch server can
+  never delete or invent real reminders.
+- **A `Resume later` button on every card** (added 2026-08-04, issue #34) is the in-app twin of the
+  skill, for the common case where the session to park is one you are looking at rather than the one
+  you are in. One click, no dialog and no note field, same contract as the VS Code button: nothing is
+  destroyed and the same button undoes it, reading `Unflag` in amber once flagged.
+  - `POST /flag-resume` takes `{ sessionId }` ONLY and resolves `name`, `cwd` and `project` from the
+    server's own sessions map, as `/focus`, `/reopen` and `/open-editor` do. **A session it does not
+    know, or one with no cwd, is refused rather than flagged**, because the cwd becomes the reattached
+    tab's working directory and a flag that resumes in the wrong folder is worse than no flag.
+  - Re-flagging updates the entry in place (refreshing what the board now knows, re-stamping
+    `flaggedAt`, KEEPING any note the skill wrote) instead of appending a duplicate the picker would
+    list twice.
+  - **The button's label is painted from the polled flag list, never from the session record.** The
+    flag file belongs to another process, so `serializeSession` deliberately gained no `flagged` field:
+    that would have meant a `readResumeFlags()` per serialize, i.e. a file read per session per
+    broadcast. `refreshResumeFlags()` (already running every 15s for the header count) repaints every
+    card through `paintAllFlagButtons()`, so there is exactly one copy of the state on the client.
 - A flag whose session has been pruned from the board is still offered, labelled "not on the board any
   more", since reattaching needs only the id.
 - The amber **Resume session** button sits next to New session with a count badge, and polls the flag
   file every 15s (the file is written by another process, so there is nothing to push).
+- **A spawn can be provably correct and still show nothing** is the lesson this area shares with the
+  VS Code buttons above, so both are covered by real measurement rather than review: the flag
+  endpoints in `scripts/smoke-server.mjs` (including that a dry run really does not reach the file)
+  and the card button in `scripts/render-check.mjs` (one POST per double click, the right endpoint for
+  each of the two states, no stray `/focus`, no confirm).
 
 ## Usage feed: context window and 5h/7d quota (`statusline-feed.mjs`)
 The 5-hour and 7-day rate-limit windows and the true context-window percentage are in NO hook
@@ -466,6 +500,10 @@ Design record: `https://claude.ai/code/artifact/d611c0ef-2208-4da3-90fb-4334b3d4
   closed session); **Take Control** (the former "Reopen") keeps its confirm and only appears on an
   active card whose focus attempt came back `unmanaged` (gated by the `is-active` class).
   `terminal.reopenSession(id, cwd, title)` titles the resumed tab with the session name.
+- **`Resume later` / `Unflag`** is the fifth footer button (`.sc-flag`), the only one whose state comes
+  from outside the session record. See "Resume later" for why. `.sc-acts` already wraps and
+  right-aligns, so a fifth button needed no layout change; `render-check.mjs`'s width sweep proves the
+  group still never leaves the card.
 - **The confirm is in-app, never `window.confirm`.** A native confirm cannot be styled at all and in
   the Electron shell renders as a bare OS dialog titled "Mission Control Center", which reads like a
   system error rather than an app decision. `showConfirm()` in `view-sessions.js` drives the
@@ -589,8 +627,9 @@ app's back/forward history and the Settings popup.
   above) was invisible to code review and took one real measurement to find. Two traps it encodes:
   `chrome --dump-dom` never returns on this page because the open SSE connection means load never
   completes, and the popup's visibility lives on `#newSessionBackdrop`, not on the panel. It also
-  covers the VS Code buttons (one POST per double click, sessionId only, no stray `/focus`, no
-  confirm) and the New session popup's one-row folder chain.
+  covers the VS Code buttons and the card's `Resume later` toggle (one POST per double click,
+  sessionId only, the right endpoint for each state, no stray `/focus`, no confirm) and the New
+  session popup's one-row folder chain.
 - **A spawn shape can be provably correct and still open nothing.** Both the `ELECTRON_RUN_AS_NODE`
   and the `detached` findings behind "Open in VS Code" passed every static and dry-run check and were
   only exposed by spawning for real and then ENUMERATING WINDOW TITLES (`EnumWindows` +

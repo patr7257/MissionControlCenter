@@ -1598,6 +1598,69 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Flag a session for resume from its card on the board: the in-app twin of the
+  // /resume-later skill, writing the SAME file in the SAME shape, so a flag made
+  // here is indistinguishable from one scripts/flag-resume.mjs wrote and
+  // flag-resume.mjs --list shows both.
+  //
+  // The name, cwd and project come from the server's OWN sessions map and never
+  // from the request, exactly as /focus, /reopen and /open-editor resolve theirs.
+  // The cwd is the load-bearing field, since it becomes the reattached tab's
+  // working directory, so a session we know nothing about (or one with no cwd) is
+  // refused rather than flagged against the wrong folder: a flag that resumes in
+  // the wrong directory is worse than no flag.
+  if (req.method === 'POST' && url === '/flag-resume') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 5_000_000) req.destroy(); // guard against runaway payloads
+    });
+    req.on('end', () => {
+      let result;
+      try {
+        const payload = JSON.parse(body || '{}');
+        const sessionId = String(payload.sessionId || '');
+        const session = sessionId ? sessions.get(sessionId) : null;
+        if (!sessionId) {
+          result = { ok: false, error: 'No session given' };
+        } else if (!session) {
+          result = { ok: false, error: 'That session is not on the board, so there is nothing to flag.' };
+        } else if (!session.cwd) {
+          result = { ok: false, error: 'No known working directory for this session, so a resume could not reopen it in the right folder.' };
+        } else {
+          const flags = readResumeFlags();
+          const existing = flags.find((f) => f.sessionId === sessionId) || null;
+          if (existing) {
+            // Re-flagging refreshes what the board now knows and re-stamps the
+            // time, rather than appending a duplicate the picker would list twice.
+            // An existing note is kept: the card cannot write one, so dropping it
+            // would silently discard something the skill recorded.
+            existing.name = session.title || existing.name || null;
+            existing.cwd = session.cwd;
+            existing.project = session.project || existing.project || null;
+            existing.flaggedAt = nowMs();
+          } else {
+            flags.push({
+              sessionId,
+              name: session.title || null,
+              cwd: session.cwd,
+              project: session.project || null,
+              note: null,
+              flaggedAt: nowMs(),
+            });
+          }
+          const written = writeResumeFlags(flags);
+          result = { ok: written.ok, persisted: written.persisted, total: flags.length, reflagged: !!existing };
+        }
+      } catch (error) {
+        result = { ok: false, error: String(error) };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(result));
+    });
+    return;
+  }
+
   // Drop a flag without resuming ("never mind, I am done with that one").
   if (req.method === 'POST' && url === '/unflag-resume') {
     let body = '';

@@ -279,6 +279,7 @@
           '<button type="button" class="sc-details">Details</button>' +
           '<button type="button" class="sc-code" title="Open this folder in VS Code">VS Code</button>' +
           '<button type="button" class="sc-code-close" title="Close the VS Code window for this folder" style="display:none">Close VS Code</button>' +
+          '<button type="button" class="sc-flag">Resume later</button>' +
           '<button type="button" class="sc-resume prim" style="display:none">Resume</button>' +
           '<button type="button" class="sc-reopen">Take Control</button>' +
         '</span>' +
@@ -303,10 +304,12 @@
       details: el.querySelector('.sc-details'),
       code: el.querySelector('.sc-code'),
       codeClose: el.querySelector('.sc-code-close'),
+      flag: el.querySelector('.sc-flag'),
       resume: el.querySelector('.sc-resume'),
       reopen: el.querySelector('.sc-reopen'),
       _status: null, _isActive: null, _title: null, _where: null, _prompt: null,
       _model: null, _badge: null, _ctxPct: undefined, _ctxSev: null, _closed: null, _editorOpen: null,
+      _flagged: null,
       _runMin: undefined, _runSev: null, _startedAt: null, _runFrozenAt: null,
       _id: s.id
     };
@@ -331,6 +334,10 @@
     c.codeClose.addEventListener('click', function (ev) {
       ev.stopPropagation();
       closeCardEditor(c);
+    });
+    c.flag.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      toggleCardFlag(c);
     });
     c.resume.addEventListener('click', function (ev) {
       ev.stopPropagation();
@@ -470,6 +477,76 @@
       clearTimeout(settle);
       release();
     });
+  }
+
+  // Flag this session to resume later, or clear the flag if it already has one.
+  // Deliberately one click with no dialog and no note field, for the same reason
+  // the VS Code button has no confirm: nothing is destroyed and the same button
+  // undoes it. The flag lands in the same file the /resume-later skill writes, so
+  // it shows up under the header's Resume session button immediately.
+  //
+  // The button's own label is the state readout (Resume later / Unflag), which is
+  // why it is painted from `resumeFlags` rather than from the session record: the
+  // flag file is owned by another process, and that list is already refreshed on a
+  // timer for the header count.
+  function toggleCardFlag(c) {
+    if (c.flag.disabled) return;
+    c.flag.disabled = true;
+    var released = false;
+    var release = function () {
+      if (released) return;
+      released = true;
+      c.flag.disabled = false;
+    };
+    var settle = setTimeout(release, 1500);
+    var wasFlagged = isFlagged(c._id);
+    var name = c._title || 'that session';
+    return fetch(wasFlagged ? '/unflag-resume' : '/flag-resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: c._id })
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (!data || data.ok === false) {
+        // The server names the real reason (not on the board, no known cwd).
+        showToast((data && data.error) ? String(data.error) : 'Could not change the resume flag.');
+      } else {
+        showToast(wasFlagged
+          ? 'No longer flagged: ' + name + '.'
+          : 'Flagged ' + name + ' to resume later.');
+      }
+      // Re-read either way: on a failure this repaints the button to whatever the
+      // truth on disk is, rather than leaving it showing a state we did not reach.
+      return refreshResumeFlags().then(function () { renderResumeList(); });
+    }).catch(function () {
+      showToast('Could not reach the server to change the resume flag.');
+    }).then(function () {
+      clearTimeout(settle);
+      release();
+    });
+  }
+
+  function isFlagged(id) {
+    for (var i = 0; i < resumeFlags.length; i += 1) {
+      if (resumeFlags[i].sessionId === id) return true;
+    }
+    return false;
+  }
+
+  function paintFlagButton(c) {
+    var flagged = isFlagged(c._id);
+    if (c._flagged === flagged) return;
+    c.flag.textContent = flagged ? 'Unflag' : 'Resume later';
+    c.flag.title = flagged
+      ? 'Remove this session from the Resume session list'
+      : 'Flag this session so it appears under Resume session';
+    c.flag.classList.toggle('is-flagged', flagged);
+    c._flagged = flagged;
+  }
+
+  // The flag list changes on its own timer and from the popup, so every card is
+  // repainted whenever it is re-read, not only when a session pushes an update.
+  function paintAllFlagButtons() {
+    cards.forEach(function (c) { paintFlagButton(c); });
   }
 
   // Shared by the card button and the end-of-session prompt, so both report the
@@ -706,6 +783,9 @@
       c.codeClose.style.display = editorOpen ? '' : 'none';
       c._editorOpen = editorOpen;
     }
+    // Resume later / Unflag. Not derived from `s` at all: the flag lives in a file
+    // another process owns, so it comes from the polled flag list instead.
+    paintFlagButton(c);
     // Runtime: remembered on the card so the per-second tick can advance the ring
     // without waiting for the next server push. A closed session freezes at its
     // last activity instead of counting up forever.
@@ -1066,6 +1146,9 @@
     return fetch('/resume-flags').then(function (res) { return res.json(); }).then(function (data) {
       resumeFlags = (data && data.flags) || [];
       paintResumeCount();
+      // Every card carries the flag as its own button label, so they follow the
+      // same list rather than keeping a second copy of the state.
+      paintAllFlagButtons();
       return resumeFlags;
     }).catch(function () { return resumeFlags; });
   }
