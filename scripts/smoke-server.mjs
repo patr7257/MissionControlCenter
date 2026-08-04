@@ -979,6 +979,26 @@ try {
     terminal.editorSpawnEnv(base);
     return base.ELECTRON_RUN_AS_NODE === '1';
   })());
+  // THE bug behind issue #33, and the reason this assertion exists at all:
+  // `windowsHide: true` is not just "no console window". Node maps it to libuv's
+  // UV_PROCESS_WINDOWS_HIDE, which sets STARTUPINFO.wShowWindow = SW_HIDE with
+  // STARTF_USESHOWWINDOW, and a GUI app honours that for its FIRST window. So a
+  // COLD VS Code start opened its window invisibly: the process ran, the folder
+  // loaded, and the button looked dead. Only the cold start was affected, because
+  // a warm instance creates the window itself, which is what made it read as
+  // intermittent. Measured by cold-starting Code.exe into a throwaway
+  // --user-data-dir and enumerating window handles: windowsHide true gave a
+  // hidden window, false a visible one, same folder.
+  const editorOpts = terminal.editorSpawnOptions({ ELECTRON_RUN_AS_NODE: '1', PATH: 'keep-me' });
+  check('terminal.mjs exports editorSpawnOptions', typeof terminal.editorSpawnOptions === 'function');
+  check('editorSpawnOptions never hides the window it is about to open (issue #33)',
+    editorOpts && editorOpts.windowsHide !== true, JSON.stringify(editorOpts && editorOpts.windowsHide));
+  check('editorSpawnOptions keeps detached, so the warm named-pipe handoff survives',
+    editorOpts && editorOpts.detached === true);
+  check('editorSpawnOptions never asks for a shell (a console flash and a quoting hazard)',
+    editorOpts && editorOpts.shell === false);
+  check('editorSpawnOptions carries the stripped env, so Code.exe cannot run as Node',
+    editorOpts && editorOpts.env && !('ELECTRON_RUN_AS_NODE' in editorOpts.env) && editorOpts.env.PATH === 'keep-me');
   check('isInsideReposRoot accepts a folder in the repos root and rejects a sibling',
     terminal.isInsideReposRoot(path.join(os.homedir(), 'repos', 'anything')) === true &&
       terminal.isInsideReposRoot(path.join(os.homedir(), 'repos-secret')) === false);

@@ -534,6 +534,42 @@ export function editorSpawnEnv(base) {
   return env;
 }
 
+// The spawn options for the editor, in one exported place so
+// scripts/smoke-server.mjs can assert the shape without spawning anything (the
+// same reason editorSpawnEnv and installerSpawnArgs are exported).
+//
+// LOAD-BEARING, and the whole of issue #33: there is deliberately NO
+// `windowsHide` here. It reads like "do not flash a console window", but Node
+// maps it to libuv's UV_PROCESS_WINDOWS_HIDE, which sets
+// STARTUPINFO.wShowWindow = SW_HIDE together with STARTF_USESHOWWINDOW, and a
+// GUI app honours that for its FIRST window. So `windowsHide: true` made a COLD
+// VS Code start create its window INVISIBLE: the process ran, the folder loaded,
+// and the button looked completely dead. Only the cold start was affected, since
+// a warm instance creates the new window itself and never saw our STARTUPINFO,
+// which is what made the bug read as intermittent rather than broken. Measured
+// by cold-starting Code.exe into a throwaway --user-data-dir and enumerating
+// window handles: hidden with the flag, visible without it.
+//
+// Nothing is lost by dropping it. Resolution always yields a GUI-subsystem
+// Code.exe (PE subsystem 2, verified; a launcher script is mapped to the exe
+// next to it by vsCodeExeFromLauncher), so there is no console to suppress, and
+// Windows ignores CREATE_NO_WINDOW anyway once DETACHED_PROCESS is set.
+//
+// `detached` must STAY. A second Code.exe does not draw the window itself: it
+// connects to the already-running instance over a named pipe, forwards the
+// folder and exits, and being killed mid-handoff means nothing happens at all
+// (measured: a non-detached spawn from a short-lived parent opened no window).
+export function editorSpawnOptions(base) {
+  return {
+    detached: true,
+    stdio: 'ignore',
+    shell: false,
+    // Without this, an inherited ELECTRON_RUN_AS_NODE makes Code.exe behave as
+    // Node and never open a window. See editorSpawnEnv above.
+    env: editorSpawnEnv(base),
+  };
+}
+
 const MAX_FOLDER_LEN = 4096;
 
 // ---- Which folders WE opened in VS Code ---------------------------------------
@@ -673,27 +709,9 @@ export function openInVsCode(folderPath) {
       return { ok: true, exe, folder, command, dryRun: true };
     }
 
-    const child = spawn(exe, args, {
-      // detached + unref so the child outlives this process. That matters because
-      // a second Code.exe does not open the window itself: it connects to the
-      // already-running instance over a named pipe, forwards the folder and exits,
-      // and being killed during that handoff means NOTHING happens at all
-      // (measured: a non-detached spawn from a short-lived parent opened no
-      // window, the detached one did).
-      //
-      // Windows ignores CREATE_NO_WINDOW (windowsHide) when DETACHED_PROCESS
-      // (detached) is set, which would matter for a console program. It does not
-      // matter here: Code.exe is a GUI-subsystem binary (PE subsystem 2, verified)
-      // so it has no console to show either way. windowsHide stays as correct
-      // intent in case the resolved exe is ever a console launcher.
-      detached: true,
-      windowsHide: true,
-      stdio: 'ignore',
-      shell: false,
-      // Without this, an inherited ELECTRON_RUN_AS_NODE makes Code.exe behave as
-      // Node and never open a window. See editorSpawnEnv above.
-      env: editorSpawnEnv(process.env),
-    });
+    // See editorSpawnOptions: detached + unref so the child outlives this
+    // process, and NO windowsHide, which would open the window hidden.
+    const child = spawn(exe, args, editorSpawnOptions(process.env));
     // MANDATORY: spawn reports ENOENT/EACCES asynchronously via 'error', which
     // the try/catch above cannot see. With no listener it becomes an uncaught
     // exception and takes the whole server down.
