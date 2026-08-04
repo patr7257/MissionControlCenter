@@ -241,6 +241,18 @@
   background: color-mix(in srgb, var(--go) 15%, transparent);
   border-color: color-mix(in srgb, var(--go) 50%, var(--line)); color: var(--go);
 }
+/* Resume later, once flagged, wears the same amber as the header's Resume session
+   button, so the card and the list that button opens agree on what "flagged"
+   looks like. Tinted rather than filled: it is a state readout on a secondary
+   footer control, not a call to action like .prim. */
+.sc-acts .sc-flag.is-flagged {
+  background: color-mix(in srgb, var(--working) 15%, transparent);
+  border-color: color-mix(in srgb, var(--working) 50%, var(--line)); color: var(--working);
+}
+.sc-acts .sc-flag.is-flagged:hover {
+  background: color-mix(in srgb, var(--working) 24%, transparent);
+  border-color: var(--working); color: var(--working);
+}
 /* Reopen only ever appears on an ACTIVE session whose focus attempt already
    came back unmanaged; a closed session gets Resume instead (see .sc-resume
    visibility, toggled in JS from isActiveSession()). */

@@ -1096,6 +1096,117 @@ try {
   check('closing needs no confirm dialog of its own', closeClick.confirmOpen === false, JSON.stringify(closeClick));
   check('a successful close reports it in a toast', /Closed the VS Code window/.test(String(closeClick.toastText)), String(closeClick.toastText));
 
+  // ---- Resume later. The card's button IS the state readout, painted from the
+  // polled flag list rather than from the session record (the flag file belongs to
+  // another process). The seeded flags cover both states in one render: 'render-1'
+  // is flagged, 'render-2' is not.
+  const flagLabels = await waitFor(async () => {
+    const r = await cdp.eval(`(function () {
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.session-card'));
+      var pick = function (needle) {
+        return cards.find(function (c) {
+          var t = c.querySelector('.sc-title');
+          return t && t.textContent.indexOf(needle) !== -1;
+        });
+      };
+      var read = function (card) {
+        if (!card) return null;
+        var b = card.querySelector('.sc-flag');
+        if (!b) return null;
+        return { label: b.textContent.trim(), flaggedClass: b.classList.contains('is-flagged'), title: b.title };
+      };
+      return { flagged: read(pick('A Deliberately')), plain: read(pick('awaiting-demo')) };
+    })()`);
+    // Poll: the flag list is fetched after first paint, so the labels settle a beat
+    // after the cards exist.
+    return r && r.flagged && r.flagged.label === 'Unflag' ? r : null;
+  }, 'the resume-later labels to settle');
+  check('a flagged session\'s card offers Unflag, in the flagged style',
+    flagLabels.flagged.label === 'Unflag' && flagLabels.flagged.flaggedClass === true, JSON.stringify(flagLabels));
+  check('an unflagged session\'s card offers Resume later, unstyled',
+    !!flagLabels.plain && flagLabels.plain.label === 'Resume later' && flagLabels.plain.flaggedClass === false,
+    JSON.stringify(flagLabels));
+
+  const flagClick = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch;
+      var calls = [], focusCalls = 0;
+      window.fetch = function (url, opts) {
+        var u = String(url);
+        if (u.indexOf('/flag-resume') !== -1 || u.indexOf('/unflag-resume') !== -1) {
+          calls.push({ url: u, body: opts && opts.body ? JSON.parse(opts.body) : null });
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, persisted: true }); } });
+        }
+        if (u.indexOf('/focus') !== -1) {
+          focusCalls += 1;
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, mode: 'focused' }); } });
+        }
+        return originalFetch(url, opts);
+      };
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.session-card'));
+      var card = cards.find(function (c) {
+        var t = c.querySelector('.sc-title');
+        return t && t.textContent.indexOf('awaiting-demo') !== -1;
+      });
+      var btn = card.querySelector('.sc-flag');
+      btn.click();
+      btn.click(); // a second, immediate click must not fire a second request
+      setTimeout(function () {
+        var toast = document.querySelector('.toast');
+        window.fetch = originalFetch;
+        resolve({
+          calls: calls, focusCalls: focusCalls,
+          confirmOpen: getComputedStyle(document.getElementById('confirmBackdrop')).display !== 'none',
+          toastText: toast ? toast.textContent : null,
+          toastShown: !!toast && toast.classList.contains('show')
+        });
+      }, 400);
+    });
+  })()`);
+  check('Resume later POSTs /flag-resume once, even on a double click',
+    flagClick.calls.length === 1 && /\/flag-resume/.test(String(flagClick.calls[0] && flagClick.calls[0].url)),
+    JSON.stringify(flagClick));
+  check('flagging sends only a sessionId, never a client-side path or name',
+    !!flagClick.calls[0] && !!flagClick.calls[0].body && !!flagClick.calls[0].body.sessionId &&
+      Object.keys(flagClick.calls[0].body).length === 1, JSON.stringify(flagClick.calls));
+  check('Resume later does not also focus the terminal (stopPropagation)', flagClick.focusCalls === 0, JSON.stringify(flagClick));
+  check('flagging needs no confirm dialog', flagClick.confirmOpen === false, JSON.stringify(flagClick));
+  check('flagging reports back in a toast', flagClick.toastShown === true && /resume later/i.test(String(flagClick.toastText)),
+    String(flagClick.toastText));
+
+  const unflagClick = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch;
+      var calls = [];
+      window.fetch = function (url, opts) {
+        var u = String(url);
+        if (u.indexOf('/flag-resume') !== -1 || u.indexOf('/unflag-resume') !== -1) {
+          calls.push({ url: u, body: opts && opts.body ? JSON.parse(opts.body) : null });
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, persisted: true }); } });
+        }
+        return originalFetch(url, opts);
+      };
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.session-card'));
+      var card = cards.find(function (c) {
+        var t = c.querySelector('.sc-title');
+        return t && t.textContent.indexOf('A Deliberately') !== -1;
+      });
+      card.querySelector('.sc-flag').click();
+      setTimeout(function () {
+        var toast = document.querySelector('.toast');
+        window.fetch = originalFetch;
+        resolve({ calls: calls, toastText: toast ? toast.textContent : null });
+      }, 400);
+    });
+  })()`);
+  // The same button in its other state must hit the OTHER endpoint, or an already
+  // flagged session would be flagged twice and never cleared from the picker.
+  check('the same button unflags an already flagged session via /unflag-resume',
+    unflagClick.calls.length === 1 && /\/unflag-resume/.test(String(unflagClick.calls[0] && unflagClick.calls[0].url)),
+    JSON.stringify(unflagClick));
+  check('unflagging from a card reports back in a toast',
+    /no longer flagged/i.test(String(unflagClick.toastText)), String(unflagClick.toastText));
+
   // ---- The end-of-session offer. Driven through the same entry point the SSE
   // `editor-prompt` frame uses, so this exercises the real queue and the real
   // dialog rather than a copy. Cancel must close NOTHING, and two prompts arriving
