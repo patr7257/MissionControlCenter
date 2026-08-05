@@ -190,8 +190,8 @@
   // Re-settle the title/favicon when the window regains or loses focus.
   document.addEventListener('visibilitychange', updateAttention);
 
-  var editorPromptHandler = null;
-  function onEditorPrompt(fn) { editorPromptHandler = fn; }
+  var sessionEndedHandler = null;
+  function onSessionEnded(fn) { sessionEndedHandler = fn; }
 
   // Handles one already-parsed message in the exact shape the SSE stream sends:
   // { type:'snapshot', firstSeenAt, agents:[...], sessions:[...] },
@@ -218,11 +218,12 @@
       updateAttention();
     } else if (msg.type === 'usage') {
       setUsage(msg.usage);
-    } else if (msg.type === 'editor-prompt') {
-      // A session ended and the server knows THIS app opened a VS Code window for
-      // its folder. Handed to whoever registered a handler (view-sessions raises
-      // the in-app confirm); nothing closes without the developer clicking.
-      if (editorPromptHandler) editorPromptHandler(msg);
+    } else if (msg.type === 'session-ended') {
+      // A session is over, however it ended (its own SessionEnd hook, the terminal
+      // window being closed, or the app's own Close session button). Handed to
+      // whoever registered a handler (view-sessions raises the in-app panel);
+      // nothing is flagged or closed without the developer clicking.
+      if (sessionEndedHandler) sessionEndedHandler(msg);
     }
   }
 
@@ -277,7 +278,7 @@
     snapshot: snapshot, onTick: onTick, connect: connect, ingest: handleMessage,
     visibleAgents: visibleAgents, visibleAgentIds: visibleAgentIds,
     selectSession: selectSession, clearSession: clearSession,
-    onNav: onNav, setNavQuiet: setNavQuiet, onEditorPrompt: onEditorPrompt,
+    onNav: onNav, setNavQuiet: setNavQuiet, onSessionEnded: onSessionEnded,
     onUsage: onUsage, needsInput: needsInput, doneAwaiting: doneAwaiting, setStats: setStats,
     fmt: { dur: fmtDur, tokens: fmtTokens, esc: esc, shortId: shortId, hash: hashStr, model: fmtModel }
   };

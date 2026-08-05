@@ -253,6 +253,26 @@
   background: color-mix(in srgb, var(--working) 24%, transparent);
   border-color: var(--working); color: var(--working);
 }
+/* One VS Code button that swaps between opening and closing (there used to be two,
+   with the close one revealed by editorOpen). Tinted while a window is open, in the
+   accent rather than the amber the flag uses, so the two toggles in the same row
+   stay distinguishable at a glance. */
+.sc-acts .sc-code.is-open, .pop-foot .ghostbtn.is-open {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); color: var(--accent);
+}
+/* Close session is the one destructive control on a card, so it is the one that
+   reads as destructive: red only on hover, since a permanently red button in a row
+   of five would pull the eye away from everything else. */
+.sc-acts .danger:hover {
+  background: color-mix(in srgb, var(--error) 15%, transparent);
+  border-color: color-mix(in srgb, var(--error) 55%, var(--line)); color: var(--error);
+}
+/* The end-of-session panel's flag button, matching the card's. */
+.pop-foot .ghostbtn.is-flagged {
+  background: color-mix(in srgb, var(--working) 15%, transparent);
+  border-color: color-mix(in srgb, var(--working) 50%, var(--line)); color: var(--working);
+}
 /* Reopen only ever appears on an ACTIVE session whose focus attempt already
    came back unmanaged; a closed session gets Resume instead (see .sc-resume
    visibility, toggled in JS from isActiveSession()). */

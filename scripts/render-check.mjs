@@ -263,6 +263,16 @@ try {
   await post('/event', { hook_event_name: 'UserPromptSubmit', session_id: SID2, cwd: CWD2, prompt: 'Summarize the CI failures from the last run' });
   await post('/event', { hook_event_name: 'Stop', session_id: SID2, cwd: CWD2 });
 
+  // A third session that has ENDED, which is the pair Close session needs: the
+  // button must exist on a running session and not on one there is nothing left to
+  // close. Seeded before the page navigates, so its `session-ended` broadcast goes
+  // out with nobody listening and cannot pop the panel over the rest of the run.
+  const SID3 = 'render-3';
+  const CWD3 = path.join(TMP_HOME, 'repos', '1-Personal', 'MissionControlCenter-ended-demo');
+  await post('/event', { hook_event_name: 'SessionStart', session_id: SID3, cwd: CWD3, model: 'claude-sonnet-5' });
+  await post('/event', { hook_event_name: 'UserPromptSubmit', session_id: SID3, cwd: CWD3, prompt: 'Bump the changelog for the release' });
+  await post('/event', { hook_event_name: 'SessionEnd', session_id: SID3, cwd: CWD3 });
+
   // Record an opened editor for SID's folder (the server runs under CMC_DRY_RUN, so
   // nothing is really spawned). That is what makes `editorOpen` true for SID and
   // false for SID2, which is exactly the pair needed to prove the Close VS Code
@@ -319,7 +329,10 @@ try {
   check('model is prettified, raw id absent', facts.bodyHasPrettyModel && !facts.bodyHasRawModel,
     'pretty=' + facts.bodyHasPrettyModel + ' raw=' + facts.bodyHasRawModel);
   check('Details action present', facts.actionLabels.indexOf('Details') !== -1, JSON.stringify(facts.actionLabels));
-  check('Open in VS Code action present', facts.actionLabels.indexOf('VS Code') !== -1, JSON.stringify(facts.actionLabels));
+  // ONE VS Code button that swaps label with the real editor state, so this card
+  // (whose folder was opened during seeding) reads Close VS Code. Matched loosely on
+  // purpose: which of the two labels is correct is asserted properly further down.
+  check('a VS Code action is present', facts.actionLabels.some((l) => /VS Code$/.test(l)), JSON.stringify(facts.actionLabels));
   check('New session button exists', facts.hasNewSessionBtn);
   check('old always-on repo bar is gone', !facts.hasRepoBar);
   // The 5 hour window is a full-width bar now and only the 7 day ring is left in
@@ -1003,7 +1016,14 @@ try {
         }
         return originalFetch(url, opts);
       };
-      var card = document.querySelector('.session-card');
+      // Explicitly a card whose folder this app has NOT opened, so the one VS Code
+      // button is in its "open" state. Picking the first card would make this test
+      // depend on the sort order deciding which state is under it.
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.session-card'));
+      var card = cards.find(function (c) {
+        var t = c.querySelector('.sc-title');
+        return t && t.textContent.indexOf('awaiting-demo') !== -1;
+      });
       var btn = card.querySelector('.sc-code');
       btn.click();
       btn.click(); // a second, immediate click must not fire a second request
@@ -1027,11 +1047,12 @@ try {
   check('opening VS Code reports back in a toast', openEditor.toastShown === true && /VS Code/.test(String(openEditor.toastText)),
     String(openEditor.toastText));
 
-  // ---- Close VS Code. The button is only offered for a folder this app opened
-  // (server-derived `editorOpen`), so it can never propose closing an editor the
-  // developer opened by hand. SID's folder was opened during seeding, SID2's was
-  // not, which is the pair that proves it.
-  const closeBtns = await cdp.eval(`(function () {
+  // ---- The ONE VS Code button, which swaps between open and close the way the
+  // flag button swaps between Resume later and Unflag. There used to be two buttons
+  // with the close one revealed by `editorOpen`; now `editorOpen` picks the label.
+  // SID's folder was opened during seeding, SID2's was not, which is the pair that
+  // proves the two states really come from the server.
+  const codeBtns = await cdp.eval(`(function () {
     var cards = Array.prototype.slice.call(document.querySelectorAll('.session-card'));
     var pick = function (needle) {
       return cards.find(function (c) {
@@ -1039,20 +1060,32 @@ try {
         return t && t.textContent.indexOf(needle) !== -1;
       });
     };
-    var vis = function (card) {
+    var read = function (card) {
       if (!card) return null;
-      var b = card.querySelector('.sc-code-close');
-      return b ? getComputedStyle(b).display !== 'none' : null;
+      var b = card.querySelector('.sc-code');
+      if (!b) return null;
+      return {
+        label: b.textContent.trim(),
+        shown: getComputedStyle(b).display !== 'none',
+        isOpen: b.classList.contains('is-open')
+      };
     };
     return {
-      opened: vis(pick('A Deliberately')),
-      notOpened: vis(pick('awaiting-demo')),
-      label: (function () { var b = document.querySelector('.sc-code-close'); return b ? b.textContent.trim() : null; })()
+      opened: read(pick('A Deliberately')),
+      notOpened: read(pick('awaiting-demo')),
+      strayCloseButtons: document.querySelectorAll('.sc-code-close').length
     };
   })()`);
-  check('Close VS Code shows on a card whose folder this app opened', closeBtns.opened === true, JSON.stringify(closeBtns));
-  check('Close VS Code stays hidden on a card whose folder it did not open', closeBtns.notOpened === false, JSON.stringify(closeBtns));
-  check('the close action is labelled Close VS Code', closeBtns.label === 'Close VS Code', String(closeBtns.label));
+  check('a card whose folder this app opened offers Close VS Code',
+    codeBtns.opened && codeBtns.opened.label === 'Close VS Code' && codeBtns.opened.shown === true,
+    JSON.stringify(codeBtns.opened));
+  check('a card whose folder it did not open offers VS Code instead, never a close',
+    codeBtns.notOpened && codeBtns.notOpened.label === 'VS Code' && codeBtns.notOpened.shown === true,
+    JSON.stringify(codeBtns.notOpened));
+  check('the open state is styled, so the two toggles in one row stay tellable apart',
+    codeBtns.opened.isOpen === true && codeBtns.notOpened.isOpen === false, JSON.stringify(codeBtns));
+  check('there is exactly ONE VS Code button per card (the old second button is gone)',
+    codeBtns.strayCloseButtons === 0, String(codeBtns.strayCloseButtons));
 
   const closeClick = await cdp.eval(`(function () {
     return new Promise(function (resolve) {
@@ -1075,7 +1108,7 @@ try {
         var t = c.querySelector('.sc-title');
         return t && t.textContent.indexOf('A Deliberately') !== -1;
       });
-      var btn = card.querySelector('.sc-code-close');
+      var btn = card.querySelector('.sc-code');
       btn.click();
       btn.click();
       setTimeout(function () {
@@ -1089,7 +1122,8 @@ try {
       }, 400);
     });
   })()`);
-  check('the Close VS Code button POSTs /close-editor once, even on a double click', closeClick.calls.length === 1, JSON.stringify(closeClick));
+  check('the VS Code button in its close state POSTs /close-editor once, even on a double click',
+    closeClick.calls.length === 1, JSON.stringify(closeClick));
   check('closing sends only a sessionId, never a client-side path',
     !!closeClick.calls[0] && !!closeClick.calls[0].sessionId && !('repo' in closeClick.calls[0]), JSON.stringify(closeClick.calls));
   check('the Close VS Code button does not also focus the terminal', closeClick.focusCalls === 0, JSON.stringify(closeClick));
@@ -1207,60 +1241,205 @@ try {
   check('unflagging from a card reports back in a toast',
     /no longer flagged/i.test(String(unflagClick.toastText)), String(unflagClick.toastText));
 
-  // ---- The end-of-session offer. Driven through the same entry point the SSE
-  // `editor-prompt` frame uses, so this exercises the real queue and the real
-  // dialog rather than a copy. Cancel must close NOTHING, and two prompts arriving
-  // together must show one at a time (the confirm is a single reused element).
-  const endPrompt = await cdp.eval(`(function () {
+  // ---- The end-of-session panel. Driven through the same entry point the SSE
+  // `session-ended` frame uses, so this exercises the real queue and the real panel
+  // rather than a copy. Three things it must get right, all of them regressions
+  // waiting to happen: only OK dismisses it (the two action buttons act and stay),
+  // each action button flips to its opposite so a mistake is undone in place, and
+  // two sessions ending together show one panel at a time.
+  //
+  // The first session is seeded with `editorOpen:false`, which is the case the old
+  // dialog got wrong: it offered to close a window that was not there, or (with no
+  // record at all) never appeared, so a session with no editor could not be flagged
+  // for resume from the moment it actually ended.
+  const endPanel = await cdp.eval(`(function () {
     return new Promise(function (resolve) {
       var originalFetch = window.fetch;
       var calls = [];
+      // render-1 is flagged in the seeded flag file, render-2 is not: the pair that
+      // proves the panel's flag button is a state readout and not a fixed label.
+      var flagged = { 'render-1': true };
       window.fetch = function (url, opts) {
-        if (String(url).indexOf('/close-editor') !== -1) {
-          calls.push(opts && opts.body ? JSON.parse(opts.body) : null);
+        var u = String(url);
+        if (u.indexOf('/close-editor') !== -1 || u.indexOf('/open-editor') !== -1) {
+          calls.push({ url: u, body: opts && opts.body ? JSON.parse(opts.body) : null });
           return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, closed: true }); } });
+        }
+        // The flag stub MIRRORS state rather than answering a constant: the button
+        // repaints from a re-read of /resume-flags after every toggle (deliberately,
+        // so a failed write shows the truth on disk), so a stub that always answers
+        // "nothing is flagged" would make a working toggle look broken.
+        if (u.indexOf('/unflag-resume') !== -1) {
+          var b1 = opts && opts.body ? JSON.parse(opts.body) : null;
+          calls.push({ url: u, body: b1 });
+          delete flagged[b1.sessionId];
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, persisted: true }); } });
+        }
+        if (u.indexOf('/flag-resume') !== -1) {
+          var b2 = opts && opts.body ? JSON.parse(opts.body) : null;
+          calls.push({ url: u, body: b2 });
+          flagged[b2.sessionId] = true;
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, persisted: true }); } });
+        }
+        if (u.indexOf('/resume-flags') !== -1) {
+          return Promise.resolve({ json: function () {
+            return Promise.resolve({ flags: Object.keys(flagged).map(function (id) { return { sessionId: id, name: id }; }) });
+          } });
         }
         return originalFetch(url, opts);
       };
-      window.ViewSessions.editorPrompt({ sessionId: 'render-1', folder: 'C:/fake/one', name: 'First Session' });
-      window.ViewSessions.editorPrompt({ sessionId: 'render-2', folder: 'C:/fake/two', name: 'Second Session' });
+      window.ViewSessions.sessionEnded({ sessionId: 'render-1', folder: 'C:/fake/one', name: 'First Session', editorOpen: false });
+      window.ViewSessions.sessionEnded({ sessionId: 'render-2', folder: 'C:/fake/two', name: 'Second Session', editorOpen: true });
       var read = function () {
         return {
-          open: getComputedStyle(document.getElementById('confirmBackdrop')).display !== 'none',
-          title: document.getElementById('confirmTitle').textContent,
-          okLabel: document.getElementById('confirmOkBtn').textContent,
-          body: document.getElementById('confirmText').textContent,
-          path: document.getElementById('confirmPath').textContent
+          open: getComputedStyle(document.getElementById('endedBackdrop')).display !== 'none',
+          title: document.getElementById('endedTitle').textContent,
+          flagLabel: document.getElementById('endedFlagBtn').textContent.trim(),
+          codeLabel: document.getElementById('endedCodeBtn').textContent.trim(),
+          okLabel: document.getElementById('endedOkBtn').textContent.trim(),
+          body: document.getElementById('endedText').textContent,
+          path: document.getElementById('endedPath').textContent
         };
       };
       var first = read();
-      // Cancel the first: it must close nothing and hand over to the queued second.
-      document.getElementById('confirmCancelBtn').click();
+      document.getElementById('endedCodeBtn').click();
       setTimeout(function () {
-        var second = read();
-        var callsAfterCancel = calls.length;
-        document.getElementById('confirmOkBtn').click();
+        // Still open: an action button acts, it does not dismiss.
+        var afterCode = read();
+        document.getElementById('endedOkBtn').click();
         setTimeout(function () {
-          var third = read();
-          window.fetch = originalFetch;
-          resolve({ first: first, second: second, third: third, callsAfterCancel: callsAfterCancel, calls: calls });
-        }, 300);
-      }, 100);
+          var second = read();
+          document.getElementById('endedFlagBtn').click();
+          setTimeout(function () {
+            var afterFlag = read();
+            // Esc is the only other way out, and it must not act on anything.
+            var callsBeforeEsc = calls.length;
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            setTimeout(function () {
+              var third = read();
+              window.fetch = originalFetch;
+              resolve({
+                first: first, afterCode: afterCode, second: second,
+                afterFlag: afterFlag, third: third,
+                callsBeforeEsc: callsBeforeEsc, calls: calls
+              });
+            }, 120);
+          }, 300);
+        }, 120);
+      }, 300);
     });
   })()`);
-  check('a session ending offers to close its VS Code window',
-    endPrompt.first.open === true && endPrompt.first.title === 'Session ended' &&
-      endPrompt.first.okLabel === 'Close VS Code', JSON.stringify(endPrompt.first));
-  check('the offer names the session and its folder',
-    /First Session/.test(endPrompt.first.body) && endPrompt.first.path === 'C:/fake/one', JSON.stringify(endPrompt.first));
-  check('the offer explains that unsaved changes are still VS Code\'s call',
-    /unsaved/i.test(endPrompt.first.body), JSON.stringify(endPrompt.first.body));
-  check('cancelling the offer closes nothing', endPrompt.callsAfterCancel === 0, JSON.stringify(endPrompt));
+  check('a session ending raises the panel, whatever its editor state',
+    endPanel.first.open === true && endPanel.first.title === 'Session ended', JSON.stringify(endPanel.first));
+  check('the panel names the session and its folder',
+    /First Session/.test(endPanel.first.body) && endPanel.first.path === 'C:/fake/one', JSON.stringify(endPanel.first));
+  check('the panel always offers the resume toggle, reading the session\'s real flag state',
+    endPanel.first.flagLabel === 'Unflag' && endPanel.second.flagLabel === 'Resume later',
+    JSON.stringify({ first: endPanel.first.flagLabel, second: endPanel.second.flagLabel }));
+  check('with no VS Code window open the panel offers to OPEN one, never to close nothing (issue #37)',
+    endPanel.first.codeLabel === 'Open VS Code', String(endPanel.first.codeLabel));
+  check('the button order is Resume later, VS Code, OK, and only OK dismisses',
+    endPanel.first.okLabel === 'OK' && endPanel.afterCode.open === true, JSON.stringify(endPanel.afterCode));
+  check('the VS Code action really fires and then flips to its opposite',
+    endPanel.calls.length >= 1 && /\/open-editor/.test(String(endPanel.calls[0].url)) &&
+      endPanel.calls[0].body.sessionId === 'render-1' && endPanel.afterCode.codeLabel === 'Close VS Code',
+    JSON.stringify({ calls: endPanel.calls, after: endPanel.afterCode.codeLabel }));
   check('a second session ending queues behind the first instead of being dropped',
-    endPrompt.second.open === true && /Second Session/.test(endPrompt.second.body), JSON.stringify(endPrompt.second));
-  check('accepting the offer POSTs /close-editor for that session',
-    endPrompt.calls.length === 1 && endPrompt.calls[0].sessionId === 'render-2', JSON.stringify(endPrompt.calls));
-  check('the dialog is gone once the queue is empty', endPrompt.third.open === false, JSON.stringify(endPrompt.third));
+    endPanel.second.open === true && /Second Session/.test(endPanel.second.body), JSON.stringify(endPanel.second));
+  check('a session whose editor IS open opens on Close VS Code',
+    endPanel.second.codeLabel === 'Close VS Code', String(endPanel.second.codeLabel));
+  check('Resume later POSTs /flag-resume with only a sessionId and flips to Unflag',
+    endPanel.calls.some(function (c) { return /\/flag-resume/.test(c.url) && c.body.sessionId === 'render-2' && !('repo' in c.body); }) &&
+      endPanel.afterFlag.flagLabel === 'Unflag' && endPanel.afterFlag.open === true,
+    JSON.stringify({ calls: endPanel.calls, after: endPanel.afterFlag }));
+  check('Esc dismisses the panel without acting on anything',
+    endPanel.third.open === false && endPanel.calls.length === endPanel.callsBeforeEsc,
+    JSON.stringify({ open: endPanel.third.open, before: endPanel.callsBeforeEsc, now: endPanel.calls.length }));
+
+  // ---- Close session. The ONE destructive control on a card, so it is the only
+  // footer button behind a confirm, and it must only exist while there is something
+  // to close. Cancelling has to POST nothing at all: the whole point of the confirm
+  // is that a stray click on a five-button row cannot kill a running session.
+  const closeSession = await cdp.eval(`(function () {
+    return new Promise(function (resolve) {
+      var originalFetch = window.fetch;
+      var calls = [], focusCalls = 0;
+      window.fetch = function (url, opts) {
+        var u = String(url);
+        if (u.indexOf('/close-session') !== -1) {
+          calls.push(opts && opts.body ? JSON.parse(opts.body) : null);
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, mode: 'tab-closed', closed: true }); } });
+        }
+        if (u.indexOf('/focus') !== -1) {
+          focusCalls += 1;
+          return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, mode: 'focused' }); } });
+        }
+        return originalFetch(url, opts);
+      };
+      // The board opens filtered to Active, so the ended session is not rendered at
+      // all until the filter is widened. Restored below, since every later check
+      // expects the default board.
+      var flt = document.getElementById('fltState');
+      flt.value = 'all';
+      flt.dispatchEvent(new Event('change'));
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.session-card'));
+      var pick = function (needle) {
+        return cards.find(function (c) {
+          var t = c.querySelector('.sc-title');
+          return t && t.textContent.indexOf(needle) !== -1;
+        });
+      };
+      var live = pick('A Deliberately');
+      var ended = pick('ended-demo');
+      var vis = function (card) {
+        if (!card) return null;
+        var b = card.querySelector('.sc-close');
+        return b ? getComputedStyle(b).display !== 'none' : null;
+      };
+      var shownOnLive = vis(live);
+      var shownOnEnded = vis(ended);
+      var btn = live.querySelector('.sc-close');
+      btn.click();
+      var confirmOpen = getComputedStyle(document.getElementById('confirmBackdrop')).display !== 'none';
+      var confirmLabel = document.getElementById('confirmOkBtn').textContent.trim();
+      var confirmBody = document.getElementById('confirmText').textContent;
+      // Cancel first: it must POST nothing.
+      document.getElementById('confirmCancelBtn').click();
+      setTimeout(function () {
+        var callsAfterCancel = calls.length;
+        btn.click();
+        document.getElementById('confirmOkBtn').click();
+        setTimeout(function () {
+          var toast = document.querySelector('.toast');
+          window.fetch = originalFetch;
+          flt.value = 'active';
+          flt.dispatchEvent(new Event('change'));
+          resolve({
+            shownOnLive: shownOnLive, shownOnEnded: shownOnEnded,
+            confirmOpen: confirmOpen, confirmLabel: confirmLabel, confirmBody: confirmBody,
+            callsAfterCancel: callsAfterCancel, calls: calls, focusCalls: focusCalls,
+            toastText: toast ? toast.textContent : null
+          });
+        }, 400);
+      }, 150);
+    });
+  })()`);
+  check('Close session is offered on a running session', closeSession.shownOnLive === true, JSON.stringify(closeSession));
+  check('Close session is NOT offered on a session that already ended (nothing to close)',
+    closeSession.shownOnEnded === false, JSON.stringify(closeSession));
+  check('Close session raises the in-app confirm, never acting on the first click',
+    closeSession.confirmOpen === true && closeSession.confirmLabel === 'Close session', JSON.stringify(closeSession));
+  check('the confirm says the session is stopped immediately and other tabs are left alone',
+    /lost/i.test(String(closeSession.confirmBody)) && /Other tabs/i.test(String(closeSession.confirmBody)),
+    String(closeSession.confirmBody));
+  check('cancelling the confirm closes nothing', closeSession.callsAfterCancel === 0, JSON.stringify(closeSession));
+  check('confirming POSTs /close-session once, with only a sessionId',
+    closeSession.calls.length === 1 && !!closeSession.calls[0].sessionId && !('pid' in closeSession.calls[0]),
+    JSON.stringify(closeSession.calls));
+  check('Close session does not also focus the terminal (stopPropagation)',
+    closeSession.focusCalls === 0, JSON.stringify(closeSession));
+  check('closing a session reports the tab really went with it',
+    /terminal tab/i.test(String(closeSession.toastText)), String(closeSession.toastText));
 
   // ---- Runtime ring thresholds. Driven by ageing the session's own startedAt in
   // the store and re-rendering through the REAL sessionsChanged path, so this
@@ -1460,12 +1639,13 @@ try {
     const nsPath = SHOT.replace(/(\.png)?$/i, '') + '-new-session.png';
     fs.writeFileSync(nsPath, Buffer.from(nsShot.data, 'base64'));
     process.stdout.write('screenshot: ' + nsPath + '\n');
-    // Fifth shot: the end-of-session offer to close VS Code, for the same reason as
-    // the Take Control shot: a modal that is closed again by the time the board
-    // settles cannot otherwise be looked at.
+    // Fifth shot: the end-of-session panel, for the same reason as the Take Control
+    // shot: a modal that is closed again by the time the board settles cannot
+    // otherwise be looked at. Shot with an editor open, so all three buttons are in
+    // the state that has the most to look at.
     await cdp.eval(`(function () {
       document.getElementById('newSessionCancelBtn').click();
-      window.ViewSessions.editorPrompt({ sessionId: 'render-1', folder: 'C:/Users/pr/repos/1-Personal/MissionControlCenter', name: 'A Deliberately Very Long Session Name To Force Ellipsis' });
+      window.ViewSessions.sessionEnded({ sessionId: 'render-1', folder: 'C:/Users/pr/repos/1-Personal/MissionControlCenter', name: 'A Deliberately Very Long Session Name To Force Ellipsis', editorOpen: true });
       return true;
     })()`);
     await new Promise((r) => setTimeout(r, 300));
@@ -1475,7 +1655,7 @@ try {
     process.stdout.write('screenshot: ' + endPath + '\n');
     // Sixth shot: the resume picker, populated from the seeded flag file.
     await cdp.eval(`(function () {
-      document.getElementById('confirmCancelBtn').click();
+      document.getElementById('endedOkBtn').click();
       window.ViewSessions.openResume();
       return true;
     })()`);

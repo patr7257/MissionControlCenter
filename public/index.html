@@ -152,6 +152,27 @@
     </div>
   </div>
 
+  <!-- The end-of-session panel. Deliberately NOT the confirm dialog above: this one
+       is not a yes/no. Its two action buttons act immediately and then flip to
+       their opposite (Resume later <-> Unflag, Close VS Code <-> Open VS Code), so
+       it is a small live control panel for the session that just ended, and only OK
+       dismisses it. Both actions are reversible from here and from the card, which
+       is why neither needs a confirm of its own. -->
+  <div class="pop-backdrop" id="endedBackdrop" style="display:none">
+    <div class="pop pop-sm" id="endedPopup" role="dialog" aria-modal="true" aria-labelledby="endedTitle" aria-describedby="endedText">
+      <div class="pop-head"><b id="endedTitle">Session ended</b><span>esc to close</span></div>
+      <div class="pop-body">
+        <p class="pop-text" id="endedText"></p>
+      </div>
+      <div class="pop-foot">
+        <span class="path" id="endedPath"></span>
+        <button id="endedFlagBtn" class="ghostbtn" type="button">Resume later</button>
+        <button id="endedCodeBtn" class="ghostbtn" type="button">Close VS Code</button>
+        <button id="endedOkBtn" class="gobtn" type="button">OK</button>
+      </div>
+    </div>
+  </div>
+
   <div id="viewSessions" class="view active">
     <!-- The 5 hour quota as a full-width bar, directly above the filters. It used
          to be a ring in the header next to the 7 day one, which made the single

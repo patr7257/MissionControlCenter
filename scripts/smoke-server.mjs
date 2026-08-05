@@ -89,6 +89,37 @@ async function readSnapshot() {
   return null;
 }
 
+// A long-lived SSE listener, so a broadcast that is not a session/agent update (the
+// `session-ended` offer) can be asserted at all: readSnapshot() above takes the
+// first frame and hangs up, which is by definition before anything the test does.
+// Fire and forget; every frame lands in `streamFrames` for whoever wants it.
+const streamFrames = [];
+async function startStreamCollector() {
+  const res = await fetch(`${BASE}/stream`);
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  (async () => {
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const line = frame.split('\n').find((l) => l.startsWith('data: '));
+          if (!line) continue; // the leading "retry:" frame
+          try { streamFrames.push(JSON.parse(line.slice(6))); } catch { /* ignore */ }
+        }
+      }
+    } catch {
+      // the server going away at the end of the run is not a failure
+    }
+  })();
+}
+
 // stderr is INHERITED, not ignored: a server that throws used to fail this suite
 // with a wall of unexplained FAILs and no stack trace anywhere, in CI included.
 // stdout stays ignored (the server is chatty about backfill on boot).
@@ -119,6 +150,7 @@ try {
   }
   check('server responds on GET /', up);
   if (!up) await cleanup(1);
+  await startStreamCollector();
 
   const root = await fetch(`${BASE}/`);
   check('GET / returns 200', root.status === 200);
@@ -450,7 +482,7 @@ try {
     closeTwice && closeTwice.ok === false && closeTwice.reason === 'not-ours');
   const snapAfterClose = await readSnapshot();
   const closedSession = snapAfterClose && snapAfterClose.sessions.find((s) => s.id === 'smoke-open');
-  check('editorOpen goes back to false after a close, so the button disappears',
+  check('editorOpen goes back to false after a close, so the one VS Code button reads "VS Code" again',
     !!closedSession && closedSession.editorOpen === false);
 
   const closeEmpty = await (await fetch(`${BASE}/close-editor`, {
@@ -466,6 +498,80 @@ try {
   })).json();
   check('POST /close-editor refuses a client path outside the repos root',
     closeOutside && closeOutside.ok === false && closeOutside.reason === 'outside-root');
+
+  // ---- Closing a session, terminal tab and all (POST /close-session). The whole
+  // safety story is in the generated script, so it is asserted as text: this is the
+  // one place in the app that kills a process, and the failure it must never have is
+  // taking down a Windows Terminal window full of the developer's other sessions.
+  const closeSessionUnknown = await (await fetch(`${BASE}/close-session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'no-such-session' }),
+  })).json();
+  check('POST /close-session refuses a session the board does not know',
+    closeSessionUnknown && closeSessionUnknown.ok === false && closeSessionUnknown.reason === 'unknown-session');
+
+  const closeSessionDead = await (await fetch(`${BASE}/close-session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-1' }),
+  })).json();
+  check('POST /close-session refuses a session with no live process, rather than killing a stale pid',
+    closeSessionDead && closeSessionDead.ok === false && closeSessionDead.reason === 'no-pid');
+
+  // A live registry file is what makes a session closable at all: the pid comes from
+  // Claude Code's own registry, resolved server side, so the page can never name a
+  // process to kill. This process's own pid stands in for a running Claude.
+  writeRegistryFile(String(process.pid), {
+    pid: process.pid,
+    sessionId: 'smoke-closable',
+    cwd: OPEN_DIR,
+    name: 'Closable Session',
+    status: 'busy',
+    statusUpdatedAt: Date.now(),
+  });
+  await sleep(REGISTRY_POLL_MS * 3);
+  const closeSessionOk = await (await fetch(`${BASE}/close-session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'smoke-closable' }),
+  })).json();
+  check('POST /close-session closes a session backed by a live registry pid',
+    closeSessionOk && closeSessionOk.ok === true && closeSessionOk.dryRun === true,
+    JSON.stringify(closeSessionOk));
+  const killScript = (closeSessionOk && closeSessionOk.script) || '';
+  check('the close-session script kills the pid the REGISTRY reported, never one from the request',
+    killScript.includes('$target = ' + String(process.pid)));
+  check('the close-session script never kills the Windows Terminal process itself (that would take every other tab with it)',
+    /windowsterminal\.exe/i.test(killScript) && !/taskkill[^\n]*grand/i.test(killScript) &&
+      /taskkill \/PID \$kill/.test(killScript));
+  check('the close-session script only promotes the kill to the tab shell when the grandparent IS Windows Terminal',
+    /\$kill = \$parent\.ProcessId/.test(killScript) &&
+      /\$grand\.Name\.ToLower\(\) -eq 'windowsterminal\.exe'/.test(killScript) &&
+      /\$shells -contains \$parent\.Name\.ToLower\(\)/.test(killScript));
+  check('the close-session script falls back to ending only Claude when the tab is not one we recognise',
+    /\$kill = \$target/.test(killScript) && /'session-only'/.test(killScript));
+  check('the close-session script sends no keystrokes and steals no focus',
+    !/SendKeys|AppActivate|SetForegroundWindow|mouse_event|SendInput/i.test(killScript));
+  check('the close-session script re-checks the process CreationDate, so a recycled pid cannot read as "still running"',
+    /\$born = \$proc\.CreationDate/.test(killScript) && /\$still\.CreationDate -ne \$born/.test(killScript));
+  check('closing a session generates no wt argument at all, so managedTabs keeps its positional tabIndex',
+    !/\bwt\b/.test(killScript));
+  // Drop the registry file BEFORE asserting, which is what a real kill does to it.
+  // That makes "exactly one" a real test of the dedupe: the registry watcher raises
+  // the same offer for a session whose file vanishes (that is the only signal when
+  // the developer closes the terminal window), so without the shared Set this would
+  // be two panels for one ending. The wait covers the SSE hop plus several polls,
+  // including the deliberate one-tick hold that keeps a `--resume` from announcing
+  // itself as an ending.
+  removeRegistryFile(String(process.pid));
+  await sleep(REGISTRY_POLL_MS * 6);
+  const endedFrames = streamFrames.filter((f) => f.type === 'session-ended' && f.sessionId === 'smoke-closable');
+  check('closing a session raises exactly one end-of-session offer (the force kill runs no SessionEnd hook)',
+    endedFrames.length === 1, 'frames: ' + endedFrames.length);
+  check('the end-of-session offer carries the folder and the live editor state, so the panel opens with the right labels',
+    endedFrames.length === 1 && typeof endedFrames[0].editorOpen === 'boolean' &&
+      endedFrames[0].name === 'Closable Session');
 
   // Subagent-only session: a session that never gets a top-level hook (no
   // SessionStart/UserPromptSubmit of its own) must not sit on the 'working'
@@ -1042,6 +1148,39 @@ try {
     editorOpts && editorOpts.shell === false);
   check('editorSpawnOptions carries the stripped env, so Code.exe cannot run as Node',
     editorOpts && editorOpts.env && !('ELECTRON_RUN_AS_NODE' in editorOpts.env) && editorOpts.env.PATH === 'keep-me');
+  // ---- `editorOpen` is now the REAL state, not a memory of having opened a folder
+  // once. This is the whole of issue #37: opened-editors.json keeps its record for 7
+  // days, so closing VS Code by hand used to leave a Close button that could only
+  // ever answer `no-window`, and an end-of-session popup asking about an editor that
+  // was not there. Asserted by really running the window query, because that is the
+  // only thing that can tell "we opened it" from "it is open".
+  check('terminal.mjs exports the live editor-window probe',
+    typeof terminal.isEditorOpen === 'function' && typeof terminal.refreshOpenEditors === 'function' &&
+      typeof terminal.openEditorFolders === 'function');
+  const GHOST_DIR = path.join(TMP_HOME, 'cmc-ghost-no-window-here');
+  fs.mkdirSync(GHOST_DIR, { recursive: true });
+  // Recorded as opened, long enough ago to be outside the grace window that covers
+  // a window still on its way up.
+  terminal.openedEditors.push({ folder: GHOST_DIR, key: terminal.normalizePath(GHOST_DIR), openedAt: Date.now() - 600000 });
+  const prevDry = process.env.CMC_DRY_RUN;
+  delete process.env.CMC_DRY_RUN;
+  check('with no reading yet, a recorded folder reports open: the probe fails OPEN, never hiding the only button that can close it',
+    terminal.isEditorOpen(GHOST_DIR) === true);
+  if (process.platform === 'win32') {
+    const probed = await terminal.refreshOpenEditors();
+    check('the window probe answers (read-only EnumWindows, no focus taken and none given)', probed === true);
+    check('a folder we opened but whose window is gone reports CLOSED, so the button reads "VS Code" again (issue #37)',
+      terminal.isEditorOpen(GHOST_DIR) === false);
+    check('openEditorFolders leaves out the folder with no window, so only changed cards are re-pushed',
+      terminal.openEditorFolders().every((f) => terminal.normalizePath(f) !== terminal.normalizePath(GHOST_DIR)));
+  } else {
+    process.stdout.write('SKIP  window probe assertions (not Windows)\n');
+  }
+  check('a folder we never opened is never reported open, however the probe went',
+    terminal.isEditorOpen(path.join(TMP_HOME, 'never-opened-at-all')) === false);
+  if (prevDry === undefined) delete process.env.CMC_DRY_RUN;
+  else process.env.CMC_DRY_RUN = prevDry;
+
   check('isInsideReposRoot accepts a folder in the repos root and rejects a sibling',
     terminal.isInsideReposRoot(path.join(os.homedir(), 'repos', 'anything')) === true &&
       terminal.isInsideReposRoot(path.join(os.homedir(), 'repos-secret')) === false);

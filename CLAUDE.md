@@ -207,9 +207,11 @@ Landed 2026-07-19 (PRs #3, #4, #6, #8):
   defaulting to "Not selected", launching in the deepest folder actually selected (or the root).
 
 ## Open in VS Code (`terminal.openInVsCode`, `POST /open-editor`)
-Two buttons, one action: a `VS Code` button in every session card footer (opens that session's `cwd`)
-and one in the New session popup footer (opens the folder the cascading dropdowns point at, without
-launching a session). `POST /open-editor` accepts `{ sessionId }` (the card; the cwd is resolved
+A `VS Code` button in every session card footer (opens that session's `cwd`) and one in the New
+session popup footer (opens the folder the cascading dropdowns point at, without launching a
+session). Since 2026-08-05 (issue #36) the card's is ONE button that swaps to `Close VS Code` while a
+window is open, the same shape as the `Resume later` / `Unflag` toggle beside it; see the next
+section for how the app knows. `POST /open-editor` accepts `{ sessionId }` (the card; the cwd is resolved
 SERVER side from the sessions map, as `/focus` and `/reopen` do) or `{ repo }` (the popup, i.e. a
 client-supplied path, so it is bounded by `terminal.isInsideReposRoot()`); `sessionId` wins when both
 are present. No confirm dialog, unlike Take Control: opening an editor creates nothing, is undone
@@ -261,9 +263,9 @@ one-time workspace-trust prompt on a new folder is expected, not a bug. `ok:true
 started, never that a window appeared, hence the present-continuous UI copy.
 
 ## Closing a VS Code window (`terminal.closeEditor`, `POST /close-editor`)
-A `Close VS Code` button appears on a card only while this app has a record of opening an editor for
-that session's folder, and a session ending offers the same thing through the in-app confirm. Added
-2026-08-03 with Patrick's explicit go-ahead on the mechanism, which matters because of the
+The card's single VS Code button reads `Close VS Code` while a window this app opened for that
+session's folder is still open, and the end-of-session panel offers the same thing. Added 2026-08-03
+with Patrick's explicit go-ahead on the mechanism, which matters because of the
 never-puppet-the-desktop rule:
 
 - **There is NO VS Code CLI for this.** `code` opens, diffs and reports status; nothing closes a
@@ -284,19 +286,92 @@ never-puppet-the-desktop rule:
 - **Only windows WE opened.** `openedEditors` in `terminal.mjs` (persisted to
   `~/.claude/agent-fleet-monitor/opened-editors.json`, pruned at 7 days, capped at 200) is the scope
   boundary Patrick chose, so the app can never propose closing an editor he opened by hand. Unlike
-  `managedTabs` nothing here is positional, so it is safely trimmable. `serializeSession` derives
-  `editorOpen` from it on every serialize (no state to sync, survives a restart), and
+  `managedTabs` nothing here is positional, so it is safely trimmable.
   `pushSessionsForFolder()` re-pushes every session sharing a cwd after an open or a close, because a
   window belongs to a folder rather than to one session.
+- **That record is NOT evidence the window is still open, which was issue #37.** It is kept for 7
+  days, so it long outlives the window: closing VS Code by hand left a `Close VS Code` that could only
+  ever answer `no-window`, and an end-of-session popup asking about an editor that was not there.
+  `serializeSession` now derives `editorOpen` from `terminal.isEditorOpen()`, which cross-checks the
+  record against the REAL windows using the same read-only `EnumWindows` pass and the same title rule
+  `closeWindowScript` matches on (`titleMatchesBaseName()` is its JS twin, so "the button is offered"
+  and "the close can find the window" are one rule, not two).
+  - **Cached, and the cache is the whole point.** The window query costs ~0.6s (the `Add-Type`
+    compile dominates) and `serializeSession` runs once per session per broadcast, so probing there
+    would be a spawn storm. `reconcileEditorWindows()` in `server.mjs` refreshes it every 20s
+    (`CMC_EDITOR_POLL_MS`), skips entirely when `openedEditors` is empty (so an idle board spawns
+    nothing at all), and re-pushes only the cards whose answer CHANGED, diffed via
+    `terminal.openEditorFolders()`.
+  - **It fails OPEN in every uncertain case**: never probed, a probe that errored or timed out, or
+    inside a 30s grace window after an open (a cold VS Code start takes seconds, and the button must
+    not flicker back to `VS Code` right after a click). A wrong "open" costs one `no-window` toast; a
+    wrong "closed" hides the only button that can close the editor.
+  - A folder whose own name contains ` - ` is never matched, which is the same fail-safe: the button
+    offers to open rather than to close a window it could not identify anyway.
 - **A close costs about 6 seconds** (Add-Type compile plus `EnumWindows` at ~0.6s, `Get-Process` per
   window, plus a 0.7s settle wait before asking whether the window went away). The first 8s cap was
   too tight and reported real closes as timeouts, so it is now 25s (`CMC_CLOSE_TIMEOUT_MS`), the UI
   toasts "Closing VS Code..." immediately, and the button's re-entrancy release is 30s so it can
   never fire mid-flight.
-- The end-of-session offer travels as its own `{ type:'editor-prompt' }` SSE frame rather than being
-  inferred from the status change, so it fires exactly once even when the card is filtered out of
-  view. `view-sessions.js` queues the prompts (`showConfirm` reuses one dialog element, and two
-  sessions can end in the same second) via a new optional `showConfirm({ onClose })` hook.
+- See "The end-of-session panel" below for how a session ending offers this.
+
+## The end-of-session panel (`{ type:'session-ended' }`, `#endedBackdrop`)
+One small panel raised whenever a session is over, added 2026-08-05 (issue #37). It replaced a
+yes/no confirm that only ever asked about VS Code, and only when there was a record of an editor, so
+a session with no editor got no offer at all and the moment worth catching (park this for later) was
+never offered.
+
+- **Three buttons, in order: `Resume later`, `Close VS Code`, `OK`, and ONLY `OK` dismisses.** The two
+  action buttons act at once and then flip to their opposite (`Unflag`, `Open VS Code`), so the panel
+  is a small live control panel for the session that just ended rather than a one-shot question. That
+  shape exists because the two questions are independent and a yes/no could only ever ask one; both
+  actions are reversible from here and from the card, which is why neither needs a confirm of its own.
+  Esc and the backdrop dismiss without acting. Patrick chose this shape explicitly.
+- **Its own dialog element, NOT `showConfirm`.** The confirm is a yes/no with a Cancel; bending it
+  into a three-button panel whose buttons do not close it would have broken Take Control and Close
+  session, which still use it exactly as before.
+- **The offer fires however a session ended**, which is three paths into one deduped
+  `pushSessionEnded()` (`promptedEndedSessions`, cleared when a session comes back to life, since a
+  `--resume` reuses the id):
+  1. the `SessionEnd` hook,
+  2. the registry watcher noticing the session's `~/.claude/sessions/<pid>.json` vanish, which is the
+     ONLY signal when the terminal window is closed outright (no hook runs then). Held one poll first:
+     a `--resume` also makes that file vanish for a moment, and announcing "session ended" over a
+     session that is coming back would be worse than a 2.5s delay.
+  3. `POST /close-session` (below), for the same reason: a force kill runs no hook.
+- It carries `editorOpen` so the panel opens with the right label instead of offering to close a
+  window that is not there, and the label comes from the panel's own state afterwards rather than
+  from a card push: the ended session's card is usually filtered off the board entirely, so nothing
+  is coming to tell it.
+- Queued (`endedQueue`), because two sessions can end in the same second and the panel is one reused
+  element.
+
+## Closing a session from the app (`terminal.closeSession`, `POST /close-session`)
+A `Close session` button on every RUNNING session's card (issue #36), the one destructive control
+there and therefore the only footer button behind the in-app confirm.
+
+- **There is no `wt close-tab`** (checked against Windows Terminal 1.24) and no Claude Code CLI that
+  ends another session, so the only mechanism is ending the process that OWNS the tab: Windows
+  Terminal closes a tab when its hosted process exits. The chain a Mission Control launch produces,
+  verified live, is `claude.exe -> powershell.exe -> WindowsTerminal.exe` (the hosted PowerShell is
+  what `launchSession`'s `powershell -NoExit -EncodedCommand` creates, and what makes a tab survive
+  Claude exiting).
+- **The `WindowsTerminal.exe` process is NEVER touched, and that is the load-bearing rule.** One
+  process hosts every tab of a window, so killing it would take down all of Patrick's other sessions.
+  The kill is `taskkill /T` on the tab's own PowerShell pid (which takes `claude.exe` with it), and
+  only after confirming the parent is a shell AND the grandparent really is `WindowsTerminal.exe`.
+  Anything else (a VS Code integrated terminal, an SSH shell, something unrecognised) falls back to
+  ending just the Claude process and reports `mode:'session-only'`, because killing an unrecognised
+  parent shell could take out a window full of unrelated work. `scripts/smoke-server.mjs` asserts the
+  generated script's shape, since that script IS the safety story.
+- **The pid is resolved SERVER side** from Claude Code's live registry, fresh per request
+  (`livePidForSession()`), never from our own session record and never from the request: a page must
+  not be able to name a process to kill, and a stale pid would be a wrong process. No live registry
+  entry means `reason:'no-pid'`, which is exactly the case where there is nothing to close.
+- **A recycled pid cannot read as "still running":** the process CreationDate is captured before the
+  kill and compared after, because Windows hands pids out again.
+- It is a force kill: no `SessionEnd` hook runs, so `/close-session` raises the end-of-session panel
+  itself (deduped against the registry watcher, which notices the same thing 2.5s later).
 
 **The New session popup is wider for this** (`.pop.newsession-pop { max-width: 760px }`, a
 popup-specific cap so the confirm and Settings dialogs keep theirs). `.chain` is now `nowrap` with
@@ -500,10 +575,16 @@ Design record: `https://claude.ai/code/artifact/d611c0ef-2208-4da3-90fb-4334b3d4
   closed session); **Take Control** (the former "Reopen") keeps its confirm and only appears on an
   active card whose focus attempt came back `unmanaged` (gated by the `is-active` class).
   `terminal.reopenSession(id, cwd, title)` titles the resumed tab with the session name.
-- **`Resume later` / `Unflag`** is the fifth footer button (`.sc-flag`), the only one whose state comes
-  from outside the session record. See "Resume later" for why. `.sc-acts` already wraps and
-  right-aligns, so a fifth button needed no layout change; `render-check.mjs`'s width sweep proves the
-  group still never leaves the card.
+- **`Resume later` / `Unflag`** (`.sc-flag`) is the one footer button whose state comes from outside
+  the session record. See "Resume later" for why. `.sc-acts` already wraps and right-aligns, so extra
+  buttons need no layout change; `render-check.mjs`'s width sweep proves the group still never leaves
+  the card.
+- **`Close session`** (`.sc-close`) shows only while the session is running, and is the only footer
+  button behind a confirm, because it is the only destructive one. Red on HOVER only: a permanently
+  red button in a row of four would pull the eye off everything else.
+- **The VS Code button is ONE button that swaps label** (`VS Code` / `Close VS Code`, tinted accent
+  while open), painted from the server's live `editorOpen`. There used to be two, with the close one
+  revealed by that flag.
 - **The confirm is in-app, never `window.confirm`.** A native confirm cannot be styled at all and in
   the Electron shell renders as a bare OS dialog titled "Mission Control Center", which reads like a
   system error rather than an app decision. `showConfirm()` in `view-sessions.js` drives the
@@ -599,7 +680,15 @@ app's back/forward history and the Settings popup.
 
 ## Verification tooling
 - `node scripts/smoke-server.mjs` - hermetic temp HOME, boots the server, checks the endpoints, hook
-  ingestion, statusline ingestion, registry reconciliation and launch command shapes. Runs in CI.
+  ingestion, statusline ingestion, registry reconciliation and launch command shapes. Runs in CI. It
+  also keeps ONE long-lived `/stream` listener (`streamFrames`) so a broadcast that is not a session
+  update, i.e. the `session-ended` offer, can be asserted at all: `readSnapshot()` takes the first
+  frame and hangs up, which is by definition before anything a test does. The `/close-session`
+  assertions read the generated PowerShell as TEXT, because that script is the whole safety story:
+  never kill `WindowsTerminal.exe`, only promote the kill to the tab shell when the grandparent is
+  Windows Terminal, and re-check the CreationDate so a recycled pid cannot read as "still running".
+  The editor-window probe is asserted by REALLY running it (Windows only, skipped elsewhere): a
+  folder recorded as opened but with no matching window must report closed.
   **It listens on port 4318, so never park an ad hoc server there**: a preview server on 4318 made the
   suite fail with a wall of unexplained FAILs, because the smoke server could not bind and every
   request hit the preview instead. Its stderr is INHERITED for exactly that reason (it used to be
@@ -627,9 +716,11 @@ app's back/forward history and the Settings popup.
   above) was invisible to code review and took one real measurement to find. Two traps it encodes:
   `chrome --dump-dom` never returns on this page because the open SSE connection means load never
   completes, and the popup's visibility lives on `#newSessionBackdrop`, not on the panel. It also
-  covers the VS Code buttons and the card's `Resume later` toggle (one POST per double click,
-  sessionId only, the right endpoint for each state, no stray `/focus`, no confirm) and the New
-  session popup's one-row folder chain.
+  covers the VS Code button and the card's `Resume later` toggle (one POST per double click,
+  sessionId only, the right endpoint for each state, no stray `/focus`, no confirm), the
+  `Close session` confirm (cancel POSTs nothing, confirm POSTs once), the end-of-session panel (only
+  OK dismisses, each action flips to its opposite, two endings queue) and the New session popup's
+  one-row folder chain. Now 152 assertions.
 - **A spawn shape can be provably correct and still open nothing.** Both the `ELECTRON_RUN_AS_NODE`
   and the `detached` findings behind "Open in VS Code" passed every static and dry-run check and were
   only exposed by spawning for real and then ENUMERATING WINDOW TITLES (`EnumWindows` +
