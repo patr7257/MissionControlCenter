@@ -635,6 +635,133 @@ export function hasOpenedEditor(folder) {
   return openedEditors.some((e) => e.key === key);
 }
 
+// ---- Is a VS Code window ACTUALLY open for this folder? -------------------------
+//
+// hasOpenedEditor() above only says we once opened it. That record is kept for 7
+// days, so it long outlives the window: closing VS Code by hand leaves the record
+// behind, which is how the board came to offer a `Close VS Code` that could only
+// ever answer `no-window`, and how the end-of-session popup came to ask about an
+// editor that was not there.
+//
+// The truth is on the desktop, so it is read from there: one EnumWindows pass (the
+// same read-only helper closeEditor uses) returns the titles of every VS Code
+// window, and a folder counts as open when a title matches it the same way
+// closeWindowScript matches. Read-only, needs no focus, changes no focus.
+//
+// CACHED, because that pass costs about 0.6s (the Add-Type compile dominates) and
+// serializeSession runs once per session per broadcast: probing there would be a
+// spawn storm. The server refreshes it on a timer instead and pushes the cards
+// whose answer changed.
+let editorWindowTitles = [];
+let editorWindowProbedAt = 0;
+let editorWindowProbe = null;
+
+// A window does not exist the instant the process is spawned: a cold VS Code start
+// takes seconds, and a warm one still has to forward the folder over its named pipe.
+// Inside this window of an open we answer "open" without evidence, so the button
+// does not flicker back to `VS Code` right after a click.
+const EDITOR_OPEN_GRACE_MS = 30000;
+
+function editorWindowsScript() {
+  return [
+    "$ErrorActionPreference = 'Continue'",
+    // Titles can carry non-ASCII (æ/ø/å in a folder name); without this the JSON
+    // comes back in the console codepage and Node reads it as mojibake.
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    'Add-Type -TypeDefinition ' + psQuote(CLOSE_WINDOW_HELPER) + " -ErrorAction Stop | Out-Null",
+    '$names = @(' + VSCODE_PROCESS_NAMES.map((n) => psQuote(n)).join(', ') + ')',
+    '$titles = @()',
+    'foreach ($w in [CmcCloser]::Windows()) {',
+    '  $p = Get-Process -Id $w.Pid -ErrorAction SilentlyContinue',
+    '  if ($null -eq $p) { continue }',
+    '  if ($names -notcontains $p.ProcessName.ToLower()) { continue }',
+    '  $titles += $w.Title',
+    '}',
+    'Write-Output (ConvertTo-Json -Compress @{ titles = @($titles) })',
+  ].join('\n');
+}
+
+// The JS twin of closeWindowScript's regex, so "the button is offered" and "the
+// close can find the window" are decided by exactly one rule. A folder whose own
+// name contains " - " is simply never matched, which fails safe: the button offers
+// to OPEN rather than to close something we could not identify anyway.
+function titleMatchesBaseName(title, baseName) {
+  const escaped = String(baseName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp('(?:^|\\ -\\ )' + escaped + '\\ -\\ Visual Studio Code(?: - Insiders)?$').test(String(title));
+}
+
+// Runs the window query once and caches its titles. Never rejects, and on any
+// failure (spawn error, timeout, unparseable output) it leaves the previous cache
+// and the probed-at stamp alone: an unanswerable probe must not be read as "every
+// editor is closed". Concurrent callers share one spawn.
+export function refreshOpenEditors() {
+  if (process.env.CMC_DRY_RUN) return Promise.resolve(false);
+  if (editorWindowProbe) return editorWindowProbe;
+  editorWindowProbe = new Promise((resolve) => {
+    let stdout = '';
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      editorWindowProbe = null;
+      resolve(value);
+    };
+    try {
+      const child = spawn(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePsCommand(editorWindowsScript())],
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }
+      );
+      const timer = setTimeout(() => {
+        try { child.kill(); } catch { /* already gone */ }
+        finish(false);
+      }, CLOSE_QUERY_TIMEOUT_MS);
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.on('error', () => { clearTimeout(timer); finish(false); });
+      child.on('close', () => {
+        clearTimeout(timer);
+        const line = stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop();
+        try {
+          const parsed = JSON.parse(line || '');
+          if (!parsed || !Array.isArray(parsed.titles)) return finish(false);
+          editorWindowTitles = parsed.titles.map((t) => String(t));
+          editorWindowProbedAt = Date.now();
+          finish(true);
+        } catch {
+          finish(false);
+        }
+      });
+    } catch {
+      finish(false);
+    }
+  });
+  return editorWindowProbe;
+}
+
+// Sync, cache-backed, safe to call once per session per broadcast.
+//
+// Fails OPEN in every uncertain case (never probed, probe failing, inside the grace
+// window after an open): the cost of a wrong "open" is one `no-window` toast, while
+// a wrong "closed" hides the only button that can close the editor.
+export function isEditorOpen(folder) {
+  if (!hasOpenedEditor(folder)) return false;
+  if (process.env.CMC_DRY_RUN) return true;
+  if (!editorWindowProbedAt) return true; // no reading yet: assume the record is good
+  const key = normalizePath(folder);
+  const record = openedEditors.find((e) => e.key === key);
+  if (record && Date.now() - record.openedAt < EDITOR_OPEN_GRACE_MS) return true;
+  const baseName = path.basename(path.resolve(String(folder)));
+  if (!baseName) return false;
+  return editorWindowTitles.some((t) => titleMatchesBaseName(t, baseName));
+}
+
+// Every folder we opened that currently counts as open. The server diffs this
+// across refreshes so only the cards whose answer changed are re-pushed.
+export function openEditorFolders() {
+  return openedEditors.map((e) => e.folder).filter((f) => isEditorOpen(f));
+}
+
 function forgetOpenedEditor(folder) {
   const key = normalizePath(folder);
   if (!key) return;
@@ -921,6 +1048,137 @@ export async function closeEditor(folderPath) {
       };
     }
     return { ok: false, reason: 'spawn-failed', error: result.error || 'Could not query the open windows.' };
+  } catch (error) {
+    return { ok: false, reason: 'spawn-failed', error: String(error) };
+  }
+}
+
+// ---- Closing a session, terminal tab and all ------------------------------------
+//
+// There is no `wt close-tab` in the Windows Terminal command line (checked against
+// 1.24), and there is no Claude Code CLI that ends another session, so the only
+// mechanism is to end the process that OWNS the tab. Windows Terminal closes a tab
+// when its hosted process exits, so killing that process closes exactly that tab.
+//
+// The chain a Mission Control launch produces, verified live:
+//   claude.exe  ->  powershell.exe  ->  WindowsTerminal.exe
+// (the hosted PowerShell exists because launchSession runs `powershell -NoExit
+// -EncodedCommand`, which is what makes the tab survive Claude exiting.)
+//
+// **The WindowsTerminal.exe process is never touched.** One process hosts every
+// tab of a window, so killing it would take down all the developer's other sessions
+// with it. We kill the tab's own shell subtree instead (`taskkill /T` on the
+// PowerShell pid, which takes claude.exe with it), and only after confirming the
+// grandparent really is WindowsTerminal.exe. Anything else (a session started from
+// a VS Code integrated terminal, from an SSH shell, or nested in something we do not
+// recognise) falls back to ending just the Claude process, because killing an
+// unrecognised parent shell could take out a window full of unrelated work.
+//
+// This is a force kill: Claude Code gets no chance to run its SessionEnd hook or to
+// write anything. That is why the only caller is behind an in-app confirm.
+const TAB_SHELL_NAMES = ['powershell.exe', 'pwsh.exe', 'cmd.exe'];
+const WT_PROCESS_NAME = 'windowsterminal.exe';
+
+function closeSessionScript(pid) {
+  return [
+    "$ErrorActionPreference = 'Continue'",
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    // `$pid` is a read-only automatic variable in PowerShell, so the target pid
+    // must never be called that: assigning it throws "Cannot overwrite variable PID".
+    '$target = ' + String(pid),
+    '$proc = Get-CimInstance Win32_Process -Filter "ProcessId = $target" -ErrorAction SilentlyContinue',
+    'if ($null -eq $proc) { Write-Output (ConvertTo-Json -Compress @{ found = $false }); exit 0 }',
+    // Captured BEFORE the kill so the "did it really go away" check below cannot be
+    // fooled by Windows handing the same pid to a brand new process.
+    '$born = $proc.CreationDate',
+    '$parent = $null',
+    '$grand = $null',
+    'if ($proc.ParentProcessId) { $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $($proc.ParentProcessId)" -ErrorAction SilentlyContinue }',
+    'if ($parent -and $parent.ParentProcessId) { $grand = Get-CimInstance Win32_Process -Filter "ProcessId = $($parent.ParentProcessId)" -ErrorAction SilentlyContinue }',
+    '$shells = @(' + TAB_SHELL_NAMES.map((n) => psQuote(n)).join(', ') + ')',
+    '$kill = $target',
+    "$mode = 'session-only'",
+    'if ($parent -and $grand -and ($shells -contains $parent.Name.ToLower()) -and ($grand.Name.ToLower() -eq ' + psQuote(WT_PROCESS_NAME) + ')) {',
+    // The tab's own shell, never $grand: that is the Windows Terminal process, which
+    // hosts every other tab in the window too.
+    '  $kill = $parent.ProcessId',
+    "  $mode = 'tab-closed'",
+    '}',
+    'taskkill /PID $kill /T /F | Out-Null',
+    '$code = $LASTEXITCODE',
+    'Start-Sleep -Milliseconds 400',
+    '$still = Get-CimInstance Win32_Process -Filter "ProcessId = $target" -ErrorAction SilentlyContinue',
+    '$gone = ($null -eq $still) -or ($still.CreationDate -ne $born)',
+    'Write-Output (ConvertTo-Json -Compress @{ found = $true; mode = $mode; killed = $kill; exit = $code; gone = $gone })',
+  ].join('\n');
+}
+
+// Same never-rejects contract as runCloseWindow above.
+function runCloseSession(pid) {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    try {
+      const child = spawn(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePsCommand(closeSessionScript(pid))],
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }
+      );
+      const timer = setTimeout(() => {
+        try { child.kill(); } catch { /* already gone */ }
+        finish({ error: 'Timed out closing that session.' });
+      }, CLOSE_QUERY_TIMEOUT_MS);
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.on('error', (error) => { clearTimeout(timer); finish({ error: String(error) }); });
+      child.on('close', () => {
+        clearTimeout(timer);
+        const line = stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop();
+        try {
+          finish(JSON.parse(line || ''));
+        } catch {
+          finish({ error: 'Could not read the result of closing that session.' });
+        }
+      });
+    } catch (error) {
+      finish({ error: String(error) });
+    }
+  });
+}
+
+// Ends the Claude process `pid` and, when it is hosted in a Windows Terminal tab we
+// can positively identify, that tab with it. `pid` comes from Claude Code's own live
+// registry (~/.claude/sessions/<pid>.json), resolved server side, so a page can
+// never name a process to kill.
+export async function closeSession(pid) {
+  try {
+    const target = Number(pid);
+    if (!Number.isInteger(target) || target <= 0) {
+      return { ok: false, reason: 'no-pid', error: 'No running process is known for this session.' };
+    }
+    if (process.env.CMC_DRY_RUN) {
+      return { ok: true, pid: target, mode: 'tab-closed', closed: true, script: closeSessionScript(target), dryRun: true };
+    }
+    const result = await runCloseSession(target);
+    if (result.error) return { ok: false, reason: 'spawn-failed', error: result.error };
+    if (result.found === false) {
+      // Already gone: the developer closed it between the card rendering and the
+      // click. Nothing to do, and nothing went wrong.
+      return { ok: true, pid: target, mode: 'already-gone', closed: true };
+    }
+    if (!result.gone) {
+      return {
+        ok: false,
+        reason: 'still-running',
+        error: 'That session is still running (exit code ' + result.exit + ' from taskkill).',
+      };
+    }
+    return { ok: true, pid: target, mode: result.mode || 'session-only', killed: result.killed, closed: true };
   } catch (error) {
     return { ok: false, reason: 'spawn-failed', error: String(error) };
   }

@@ -126,12 +126,17 @@ function serializeSession(s) {
     ctxTokens: s.ctxTokens != null ? s.ctxTokens : null,
     ctxSize: s.ctxSize != null ? s.ctxSize : null,
     usageAt: s.usageAt != null ? s.usageAt : null,
-    // True when THIS app opened a VS Code window for this cwd, which is what
-    // reveals the card's "Close VS Code" button. Derived on every serialize rather
-    // than stored on the session, so it needs no syncing and survives a restart
-    // (terminal.mjs persists the record). Two sessions in one folder both show the
-    // button and both refer to the same window: correct, if slightly redundant.
-    editorOpen: terminal.hasOpenedEditor(s.cwd),
+    // True when a VS Code window this app opened for this cwd is STILL OPEN, which
+    // is what flips the card's one VS Code button from "VS Code" to "Close VS Code".
+    // It used to be terminal.hasOpenedEditor() alone, i.e. "we once opened it", a
+    // record kept for 7 days that happily outlives the window: closing the editor by
+    // hand left a Close button that could only ever answer `no-window`. It is now
+    // cross-checked against the real windows (terminal.isEditorOpen, cache-backed
+    // precisely so this stays cheap enough to run per session per broadcast).
+    // Derived on every serialize rather than stored on the session, so it needs no
+    // syncing and survives a restart. Two sessions in one folder both report it and
+    // both refer to the same window: correct, if slightly redundant.
+    editorOpen: terminal.isEditorOpen(s.cwd),
   };
 }
 
@@ -150,6 +155,38 @@ function pushSessionsForFolder(folder) {
   for (const session of sessions.values()) {
     if (terminal.normalizePath(session.cwd) === key) pushSession(session);
   }
+}
+
+// ---- The end-of-session offer --------------------------------------------------
+//
+// A session ending is the moment to decide whether to pick it up later and whether
+// its editor should go, so the board raises one small panel then: flag it to resume,
+// close its VS Code window, or neither. It travels as its own frame rather than
+// being inferred from the status change, so it fires exactly once even when the card
+// is filtered out of view, and it carries `editorOpen` so the panel opens with the
+// right label instead of offering to close a window that is not there.
+//
+// It used to fire only when we had a record of opening an editor, which is why a
+// session with no editor got no offer at all.
+const promptedEndedSessions = new Set();
+
+function pushSessionEnded(session) {
+  if (!session || !session.id) return;
+  if (promptedEndedSessions.has(session.id)) return;
+  promptedEndedSessions.add(session.id);
+  broadcast({
+    type: 'session-ended',
+    sessionId: session.id,
+    folder: session.cwd || '',
+    name: session.title || session.project || session.id,
+    editorOpen: terminal.isEditorOpen(session.cwd),
+  });
+}
+
+// A session that comes back to life (a `--resume` reuses the id) must be able to
+// raise the offer again when it ends the second time.
+function clearEndedPrompt(sessionId) {
+  promptedEndedSessions.delete(sessionId);
 }
 
 function snapshotPayload() {
@@ -703,20 +740,10 @@ function handleEvent(payload) {
       session.live = false;
       session.lastActivityAt = nowMs();
       pushSession(session);
-      // The session is over, so its editor window probably is too. Offer to close
-      // it, but only when WE opened it (terminal.mjs keeps that record), and only
-      // as an offer: the frontend raises its own confirm and nothing closes without
-      // a click. A dedicated frame rather than letting the board infer it from the
-      // status change, so it fires exactly once even when the card is filtered out
-      // of view.
-      if (session.cwd && terminal.hasOpenedEditor(session.cwd)) {
-        broadcast({
-          type: 'editor-prompt',
-          sessionId: session.id,
-          folder: session.cwd,
-          name: session.title || session.project || session.id,
-        });
-      }
+      // Always offered now, editor or no editor: parking the session for later is
+      // the point, and closing its VS Code window is the extra the panel adds when
+      // there is really one open. Nothing acts without a click.
+      pushSessionEnded(session);
       return;
     }
     default:
@@ -1086,6 +1113,64 @@ function backfillSessions() {
 // ---------------------------------------------------------------------------
 // Session registry reconciliation (best effort, never throws)
 // ---------------------------------------------------------------------------
+// ---- Editor windows: is the VS Code we opened still there? ---------------------
+//
+// terminal.isEditorOpen() answers from a cache; this is what fills it. A folder's
+// window can go away without us hearing about it (the developer closes it by hand,
+// or VS Code exits), so it is polled, and only the cards whose answer CHANGED are
+// re-pushed: the point of the cache is that a serialize costs nothing.
+//
+// 20s rather than the registry's 2.5s, because the query costs ~0.6s of PowerShell
+// and nothing here is urgent: a stale button for a few seconds is invisible, and a
+// wrong click just reports `no-window`. Skipped entirely when we have never opened
+// an editor, which is the common case, so an idle board spawns nothing at all.
+const EDITOR_POLL_MS = parseInt(process.env.CMC_EDITOR_POLL_MS, 10) || 20000;
+
+async function reconcileEditorWindows() {
+  try {
+    if (process.env.CMC_DRY_RUN) return;
+    if (terminal.openedEditors.length === 0) return;
+    const before = new Set(terminal.openEditorFolders().map((f) => terminal.normalizePath(f)));
+    const ok = await terminal.refreshOpenEditors();
+    if (!ok) return; // unanswerable probe: leave every card as it is
+    const after = new Set(terminal.openEditorFolders().map((f) => terminal.normalizePath(f)));
+    for (const entry of terminal.openedEditors) {
+      const key = entry.key;
+      if (before.has(key) === after.has(key)) continue;
+      pushSessionsForFolder(entry.folder);
+    }
+  } catch {
+    // best effort only
+  }
+}
+
+// The pid of the live Claude process behind a session, read FRESH from the registry
+// rather than from our own session record: it is what /close-session kills, so a
+// stale value would be a wrong process. Returns null when the session is not
+// running, which is exactly when there is nothing to close.
+function livePidForSession(sessionId) {
+  if (!sessionId) return null;
+  let files;
+  try {
+    files = fs.existsSync(SESSIONS_REGISTRY_DIR)
+      ? fs.readdirSync(SESSIONS_REGISTRY_DIR).filter((f) => f.endsWith('.json'))
+      : [];
+  } catch {
+    return null;
+  }
+  for (const file of files) {
+    try {
+      const entry = JSON.parse(fs.readFileSync(path.join(SESSIONS_REGISTRY_DIR, file), 'utf8'));
+      if (!entry || entry.sessionId !== sessionId) continue;
+      if (!registryPidAlive(entry.pid)) continue;
+      return entry.pid;
+    } catch {
+      continue; // half-written this tick, or otherwise unreadable
+    }
+  }
+  return null;
+}
+
 // Claude Code maintains ~/.claude/sessions/<pid>.json, one small file per
 // currently-running session, which is authoritative ground truth for live
 // status: far better than the ~/.claude/ide/*.lock heuristic in isCwdLive()
@@ -1131,6 +1216,10 @@ function registryPidAlive(pid) {
 // downgraded exactly once, the same tick it happens rather than lingering.
 let lastRegistryLiveSessionIds = new Set();
 
+// Sessions whose registry file vanished last tick, held one poll so a `--resume`
+// (which also makes the file vanish briefly) does not announce itself as an ending.
+const pendingEndPrompts = new Map();
+
 function reconcileSessionRegistry() {
   let files;
   try {
@@ -1158,6 +1247,17 @@ function reconcileSessionRegistry() {
 
     const session = ensureSession(entry.sessionId, entry.cwd, null);
     let changed = false;
+
+    // Alive again (a `--resume` reuses the session id), so it may raise the
+    // end-of-session offer once more when it stops. Also cancels a pending offer
+    // from the previous tick, which is what stops a resume that straddles two polls
+    // from announcing itself as an ending.
+    clearEndedPrompt(entry.sessionId);
+    pendingEndPrompts.delete(entry.sessionId);
+    // The pid is what /close-session needs to end this session's terminal tab. Kept
+    // internal (never serialized to the page): a client must not be able to name a
+    // process to kill, so the endpoint re-resolves it from the registry anyway.
+    session.pid = entry.pid;
 
     if (!session.live) {
       session.live = true;
@@ -1239,8 +1339,23 @@ function reconcileSessionRegistry() {
     const before = session.status;
     const wasLive = session.live;
     session.live = false;
+    session.pid = null;
     downgradeToRecentIfInFlight(session);
     if (wasLive || session.status !== before) pushSession(session);
+    // Closing the terminal window kills Claude outright, so no SessionEnd hook ever
+    // fires and this is the only signal that the session is over. Held for one poll
+    // before the offer goes out: a `--resume` also makes the old registry file
+    // vanish for a moment, and announcing "session ended" over a session that is
+    // coming back would be worse than a 2.5s delay.
+    pendingEndPrompts.set(id, true);
+  }
+
+  for (const id of Array.from(pendingEndPrompts.keys())) {
+    if (nowLiveIds.has(id)) { pendingEndPrompts.delete(id); continue; }
+    if (lastRegistryLiveSessionIds.has(id)) continue; // queued this very tick, wait one more
+    pendingEndPrompts.delete(id);
+    const session = sessions.get(id);
+    if (session) pushSessionEnded(session);
   }
 
   lastRegistryLiveSessionIds = nowLiveIds;
@@ -1547,6 +1662,53 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // End a session and, when it is hosted in a Windows Terminal tab we can identify,
+  // close that tab with it. Only { sessionId } is accepted and the pid is resolved
+  // SERVER side from Claude Code's live registry: a page must never be able to name
+  // a process to kill. Confirm-gated in the UI, because this is a force kill (no
+  // SessionEnd hook runs, so the end-of-session offer is raised from here instead).
+  if (req.method === 'POST' && url === '/close-session') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 5_000_000) req.destroy(); // guard against runaway payloads
+    });
+    req.on('end', async () => {
+      let result;
+      try {
+        const payload = JSON.parse(body || '{}');
+        const session = sessions.get(payload.sessionId);
+        if (!session) {
+          result = { ok: false, reason: 'unknown-session', error: 'Mission Control does not know that session.' };
+        } else {
+          const pid = livePidForSession(session.id);
+          if (!pid) {
+            result = { ok: false, reason: 'no-pid', error: 'That session is not running any more, so there is nothing to close.' };
+          } else {
+            result = await terminal.closeSession(pid);
+            if (result && result.ok) {
+              session.status = 'ended';
+              session.live = false;
+              session.pid = null;
+              session.lastActivityAt = nowMs();
+              pushSession(session);
+              // The kill gives Claude no chance to run its SessionEnd hook, so the
+              // offer that hook would have triggered is raised here instead. The
+              // registry watcher would also notice in a couple of seconds; the Set
+              // inside pushSessionEnded is what keeps that from being two panels.
+              pushSessionEnded(session);
+            }
+          }
+        }
+      } catch (error) {
+        result = { ok: false, reason: 'spawn-failed', error: String(error) };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(result));
+    });
+    return;
+  }
+
   if (req.method === 'GET' && url === '/resume-flags') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ flags: serializeResumeFlags() }));
@@ -1728,6 +1890,8 @@ server.listen(PORT, '127.0.0.1', () => {
   setInterval(backfillSessions, 30000);
   reconcileSessionRegistry();
   setInterval(reconcileSessionRegistry, REGISTRY_POLL_MS);
+  reconcileEditorWindows();
+  setInterval(reconcileEditorWindows, EDITOR_POLL_MS);
 });
 
 function shutdown() {

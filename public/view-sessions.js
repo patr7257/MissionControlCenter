@@ -278,10 +278,10 @@
         '<span class="sc-acts">' +
           '<button type="button" class="sc-details">Details</button>' +
           '<button type="button" class="sc-code" title="Open this folder in VS Code">VS Code</button>' +
-          '<button type="button" class="sc-code-close" title="Close the VS Code window for this folder" style="display:none">Close VS Code</button>' +
           '<button type="button" class="sc-flag">Resume later</button>' +
           '<button type="button" class="sc-resume prim" style="display:none">Resume</button>' +
           '<button type="button" class="sc-reopen">Take Control</button>' +
+          '<button type="button" class="sc-close danger" title="End this session and close its terminal tab" style="display:none">Close session</button>' +
         '</span>' +
       '</div>';
     el.classList.add('enter');
@@ -303,10 +303,10 @@
       badge: el.querySelector('.sc-badge'),
       details: el.querySelector('.sc-details'),
       code: el.querySelector('.sc-code'),
-      codeClose: el.querySelector('.sc-code-close'),
       flag: el.querySelector('.sc-flag'),
       resume: el.querySelector('.sc-resume'),
       reopen: el.querySelector('.sc-reopen'),
+      close: el.querySelector('.sc-close'),
       _status: null, _isActive: null, _title: null, _where: null, _prompt: null,
       _model: null, _badge: null, _ctxPct: undefined, _ctxSev: null, _closed: null, _editorOpen: null,
       _flagged: null,
@@ -329,11 +329,7 @@
     });
     c.code.addEventListener('click', function (ev) {
       ev.stopPropagation();
-      openCardInEditor(c);
-    });
-    c.codeClose.addEventListener('click', function (ev) {
-      ev.stopPropagation();
-      closeCardEditor(c);
+      toggleCardEditor(c);
     });
     c.flag.addEventListener('click', function (ev) {
       ev.stopPropagation();
@@ -346,6 +342,10 @@
     c.reopen.addEventListener('click', function (ev) {
       ev.stopPropagation();
       reopenCard(c);
+    });
+    c.close.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      closeCardSession(c);
     });
     return c;
   }
@@ -417,11 +417,31 @@
   }
   function resumeCard(c) { doReopen(c); }
 
-  // Open this session's folder in VS Code. Deliberately NOT behind a confirm the
-  // way Take Control is: opening an editor creates nothing, mutates nothing, is
-  // undone with Ctrl+W, and is idempotent (VS Code forwards the folder to a
-  // running instance and focuses it), so a second click is harmless. Only the
-  // sessionId is sent: the server resolves the cwd itself, as with /focus.
+  // ONE VS Code button that swaps between open and close, the same shape as the
+  // Resume later / Unflag button next to it. It used to be two buttons, with the
+  // close one revealed by `editorOpen`; a single toggle is less to read and cannot
+  // show both at once.
+  //
+  // The state behind it is now the REAL one: the server cross-checks its record of
+  // opening a folder against the windows that actually exist, so closing VS Code by
+  // hand flips this button back to `VS Code` instead of leaving a close that can
+  // only report `no-window`.
+  //
+  // Neither direction is behind a confirm, for the same reason as before: nothing is
+  // destroyed, VS Code raises its own "save your changes?" prompt, and this very
+  // button undoes whichever way it went.
+  function toggleCardEditor(c) {
+    if (c._editorOpen) return closeCardEditor(c);
+    return openCardInEditor(c);
+  }
+
+  // The timeout used to release a button whose request never settles. Well above the
+  // server's own cap on the window query (measured at about 6s for a real close,
+  // capped at 25s), so it can only fire when the promise is genuinely lost.
+  var SLOW_RELEASE_MS = 30000;
+
+  // Open this session's folder in VS Code. Only the sessionId is sent: the server
+  // resolves the cwd itself, as with /focus.
   function openCardInEditor(c) {
     if (c.code.disabled) return; // a disabled button dispatches no click, so this
     c.code.disabled = true;      // is belt and braces against a double fire
@@ -456,24 +476,80 @@
     });
   }
 
-  // Close the VS Code window for this session's folder. No confirm, for the same
-  // reason opening has none: nothing is destroyed, and VS Code raises its own
-  // "save your changes?" prompt for anything unsaved. The server refuses unless
-  // this app opened that window, so the button is only ever shown when it can act.
+  // Close the VS Code window for this session's folder. The server refuses unless
+  // this app opened that window, so the button only ever reads "Close VS Code" when
+  // it can really act.
   function closeCardEditor(c) {
-    if (c.codeClose.disabled) return;
-    c.codeClose.disabled = true;
+    if (c.code.disabled) return;
+    c.code.disabled = true;
     var released = false;
     var release = function () {
       if (released) return;
       released = true;
-      c.codeClose.disabled = false;
+      c.code.disabled = false;
     };
-    // Well above the server's own cap on the window query (measured at about 6s
-    // for a real close, capped at 25s), so this fallback can only ever fire when
-    // the promise is genuinely lost, never while a request is still in flight.
-    var settle = setTimeout(release, 30000);
+    var settle = setTimeout(release, SLOW_RELEASE_MS);
     return postCloseEditor({ sessionId: c._id }, c._title).then(function () {
+      clearTimeout(settle);
+      release();
+    });
+  }
+
+  // End this session and close its terminal tab. The ONE destructive action on a
+  // card, so it is the only footer button behind a confirm: the kill is forced, so
+  // Claude gets no chance to run its SessionEnd hook or save anything, and there is
+  // no undo beyond resuming the session afterwards.
+  //
+  // The server resolves the process itself from Claude Code's live registry (the
+  // page never names a pid), and only closes the tab's own shell when it can prove
+  // the tab belongs to Windows Terminal, so a window full of other sessions is never
+  // taken down with it.
+  function closeCardSession(c) {
+    showConfirm({
+      title: 'Close session',
+      html: 'End <b></b> and close its terminal tab.' +
+        '<span class="note">The session is stopped immediately, so anything it was in the middle of is lost. ' +
+        'Other tabs in that terminal window are left alone. You can resume the session from its card afterwards.</span>',
+      name: c._title || 'this session',
+      path: c._cwd || '',
+      confirmLabel: 'Close session',
+      opener: c.close
+    }, function () { doCloseSession(c); });
+  }
+
+  function doCloseSession(c) {
+    if (c.close.disabled) return;
+    c.close.disabled = true;
+    var released = false;
+    var release = function () {
+      if (released) return;
+      released = true;
+      c.close.disabled = false;
+    };
+    var settle = setTimeout(release, SLOW_RELEASE_MS);
+    var name = c._title || 'that session';
+    showToast('Closing ' + name + '...');
+    return fetch('/close-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: c._id })
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (!data || data.ok === false) {
+        // The server names the real reason (unknown session, nothing running any
+        // more, taskkill refused).
+        showToast((data && data.error) ? String(data.error) : 'Could not close that session.');
+      } else if (data.mode === 'already-gone') {
+        showToast(name + ' had already stopped.');
+      } else if (data.mode === 'tab-closed') {
+        showToast('Closed ' + name + ' and its terminal tab.');
+      } else {
+        // We could not prove the tab was ours, so only Claude was stopped. Say so
+        // rather than claiming a tab closed that is still sitting there.
+        showToast('Stopped ' + name + '. Its terminal was not one this app can close, so it is still open.');
+      }
+    }).catch(function () {
+      showToast('Could not reach the server to close that session.');
+    }).then(function () {
       clearTimeout(settle);
       release();
     });
@@ -578,40 +654,181 @@
     });
   }
 
-  // ---- End-of-session offer. The server sends one `editor-prompt` frame when a
-  // session ends and it knows this app opened a VS Code window for that session's
-  // folder. Queued, because two sessions can end within the same second and the
-  // confirm dialog is a single reused element. ----
-  var editorPromptQueue = [];
-  var editorPromptOpen = false;
-  function queueEditorPrompt(msg) {
+  // ---- End-of-session panel. The server sends one `session-ended` frame however a
+  // session ended: its own SessionEnd hook, the terminal window being closed (no
+  // hook fires then, the registry watcher notices), or this app's Close session
+  // button. Queued, because two sessions can end within the same second and the
+  // panel is a single reused element.
+  //
+  // Not a confirm: both buttons act at once and then flip to their opposite, so the
+  // panel is a small live control panel for the session that just ended. Only OK
+  // dismisses it. That shape exists because the two questions are independent (park
+  // it for later, and deal with its editor) and a yes/no could only ever ask one.
+  var endedQueue = [];
+  var endedOpen = false;
+  var endedState = null;
+
+  function queueSessionEnded(msg) {
     if (!msg || !msg.sessionId) return;
     // Never stack duplicates for one session (a SessionEnd can arrive twice).
-    var already = editorPromptQueue.some(function (m) { return m.sessionId === msg.sessionId; });
+    var already = endedQueue.some(function (m) { return m.sessionId === msg.sessionId; });
     if (already) return;
-    editorPromptQueue.push(msg);
-    showNextEditorPrompt();
+    if (endedState && endedState.msg.sessionId === msg.sessionId) return;
+    endedQueue.push(msg);
+    showNextSessionEnded();
   }
-  function showNextEditorPrompt() {
-    if (editorPromptOpen) return;
-    var msg = editorPromptQueue.shift();
+
+  function showNextSessionEnded() {
+    if (endedOpen) return;
+    var msg = endedQueue.shift();
     if (!msg) return;
-    editorPromptOpen = true;
-    var done = function () {
-      editorPromptOpen = false;
-      showNextEditorPrompt();
-    };
-    showConfirm({
-      title: 'Session ended',
-      html: '<b></b> has ended. Close the VS Code window Mission Control opened for it?' +
-        '<span class="note">VS Code will still ask about anything unsaved. Cancel leaves the window open.</span>',
-      name: msg.name || 'That session',
-      path: msg.folder || '',
-      confirmLabel: 'Close VS Code',
-      onClose: done
-    }, function () {
-      postCloseEditor({ sessionId: msg.sessionId }, msg.name);
+    var backdrop = document.getElementById('endedBackdrop');
+    var textEl = document.getElementById('endedText');
+    var pathEl = document.getElementById('endedPath');
+    // No panel in the DOM (an embedded or older shell): drop the offer rather than
+    // acting on the developer's behalf. Nothing here is urgent and both actions are
+    // on the card anyway.
+    if (!backdrop || !textEl) return;
+    endedOpen = true;
+    endedState = { msg: msg, editorOpen: !!msg.editorOpen };
+    textEl.innerHTML = '<b></b> has ended.' +
+      '<span class="note">Flag it to pick up later, or deal with its VS Code window. ' +
+      'Both are the same actions the card offers, and both can be undone right here.</span>';
+    // The session name is the one untrusted string, so it is written as text into
+    // the placeholder rather than interpolated into the HTML above.
+    var nameSlot = textEl.querySelector('b');
+    if (nameSlot) nameSlot.textContent = msg.name || 'That session';
+    if (pathEl) pathEl.textContent = msg.folder || '';
+    paintEndedButtons();
+    backdrop.style.display = 'flex';
+    var ok = document.getElementById('endedOkBtn');
+    if (ok) ok.focus();
+    document.addEventListener('keydown', onEndedKeydown);
+  }
+
+  function closeEndedPanel() {
+    var backdrop = document.getElementById('endedBackdrop');
+    if (backdrop) backdrop.style.display = 'none';
+    document.removeEventListener('keydown', onEndedKeydown);
+    endedState = null;
+    endedOpen = false;
+    showNextSessionEnded();
+  }
+
+  function onEndedKeydown(e) {
+    if (e.key === 'Escape' || e.key === 'Enter') {
+      // Enter on one of the action buttons means that button: let its own default
+      // win rather than dismissing the panel out from under the click.
+      if (e.key === 'Enter' && e.target && e.target.tagName === 'BUTTON'
+        && e.target.id !== 'endedOkBtn') return;
+      e.preventDefault();
+      closeEndedPanel();
+    }
+  }
+
+  // Both action buttons are pure state readouts, exactly like the card's flag
+  // button: the label says what a click will do, never what just happened.
+  function paintEndedButtons() {
+    if (!endedState) return;
+    var flagBtn = document.getElementById('endedFlagBtn');
+    var codeBtn = document.getElementById('endedCodeBtn');
+    if (flagBtn) {
+      var flagged = isFlagged(endedState.msg.sessionId);
+      flagBtn.textContent = flagged ? 'Unflag' : 'Resume later';
+      flagBtn.title = flagged
+        ? 'Remove this session from the Resume session list'
+        : 'Flag this session so it appears under Resume session';
+      flagBtn.classList.toggle('is-flagged', flagged);
+    }
+    if (codeBtn) {
+      codeBtn.textContent = endedState.editorOpen ? 'Close VS Code' : 'Open VS Code';
+      codeBtn.title = endedState.editorOpen
+        ? 'Close the VS Code window for this folder'
+        : 'Open this folder in VS Code';
+      codeBtn.classList.toggle('is-open', endedState.editorOpen);
+    }
+  }
+
+  function endedToggleFlag() {
+    if (!endedState) return;
+    var btn = document.getElementById('endedFlagBtn');
+    if (btn && btn.disabled) return;
+    if (btn) btn.disabled = true;
+    var id = endedState.msg.sessionId;
+    var name = endedState.msg.name || 'that session';
+    var wasFlagged = isFlagged(id);
+    return fetch(wasFlagged ? '/unflag-resume' : '/flag-resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: id })
+    }).then(function (res) { return res.json(); }).then(function (data) {
+      if (!data || data.ok === false) {
+        showToast((data && data.error) ? String(data.error) : 'Could not change the resume flag.');
+      } else {
+        showToast(wasFlagged
+          ? 'No longer flagged: ' + name + '.'
+          : 'Flagged ' + name + ' to resume later.');
+      }
+      // Re-read either way, so on a failure the button repaints to the truth on
+      // disk rather than to the state we did not reach.
+      return refreshResumeFlags().then(function () {
+        renderResumeList();
+        paintEndedButtons();
+      });
+    }).catch(function () {
+      showToast('Could not reach the server to change the resume flag.');
+    }).then(function () {
+      if (btn) btn.disabled = false;
     });
+  }
+
+  function endedToggleEditor() {
+    if (!endedState) return;
+    var btn = document.getElementById('endedCodeBtn');
+    if (btn && btn.disabled) return;
+    if (btn) btn.disabled = true;
+    var msg = endedState.msg;
+    var wasOpen = endedState.editorOpen;
+    var call = wasOpen
+      ? postCloseEditor({ sessionId: msg.sessionId }, msg.name)
+      : fetch('/open-editor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: msg.sessionId })
+      }).then(function (res) { return res.json(); }).then(function (data) {
+        if (!data || data.ok === false) {
+          showToast((data && data.error) ? String(data.error) : 'Could not open VS Code.');
+        } else {
+          showToast('Opening ' + (msg.name || 'that folder') + ' in VS Code.');
+        }
+      }).catch(function () {
+        showToast('Could not reach the server to open VS Code.');
+      });
+    return call.then(function () {
+      // Flip on the panel's own state rather than waiting for a card push: this
+      // session's card may not even be rendered (the board filters closed sessions
+      // out by default), so there is nothing coming to tell us.
+      if (endedState && endedState.msg.sessionId === msg.sessionId) {
+        endedState.editorOpen = !wasOpen;
+        paintEndedButtons();
+      }
+      if (btn) btn.disabled = false;
+    });
+  }
+
+  function initEndedPanel() {
+    var backdrop = document.getElementById('endedBackdrop');
+    var flagBtn = document.getElementById('endedFlagBtn');
+    var codeBtn = document.getElementById('endedCodeBtn');
+    var okBtn = document.getElementById('endedOkBtn');
+    if (flagBtn) flagBtn.addEventListener('click', endedToggleFlag);
+    if (codeBtn) codeBtn.addEventListener('click', endedToggleEditor);
+    if (okBtn) okBtn.addEventListener('click', closeEndedPanel);
+    if (backdrop) {
+      backdrop.addEventListener('click', function (ev) {
+        if (ev.target === backdrop) closeEndedPanel();
+      });
+    }
   }
 
   // ---- In-app confirm (markup in index.html). window.confirm() cannot be
@@ -768,19 +985,25 @@
       }
       c._ctxPct = ctxPct;
     }
-    // Actions: Details and VS Code always, Resume when closed, Reopen (CSS-driven
-    // via .unmanaged.is-active) only while active and unmanaged, Close VS Code only
-    // while this app has a record of opening an editor for this folder (the server
-    // derives `editorOpen` from that record, so the button is never offered when the
-    // server would refuse it).
+    // Actions: Details and VS Code always, Resume when closed, Close session only
+    // while the session is still running (there is no terminal to close otherwise),
+    // Reopen (CSS-driven via .unmanaged.is-active) only while active and unmanaged.
     var closed = !isActive;
     if (c._closed !== closed) {
       c.resume.style.display = closed ? '' : 'none';
+      c.close.style.display = closed ? 'none' : '';
       c._closed = closed;
     }
+    // The VS Code button's LABEL is the state readout, the same way the flag button
+    // works: `editorOpen` is the server's live answer about whether a window this app
+    // opened for this folder is still there.
     var editorOpen = !!s.editorOpen;
     if (c._editorOpen !== editorOpen) {
-      c.codeClose.style.display = editorOpen ? '' : 'none';
+      c.code.textContent = editorOpen ? 'Close VS Code' : 'VS Code';
+      c.code.title = editorOpen
+        ? 'Close the VS Code window for this folder'
+        : 'Open this folder in VS Code';
+      c.code.classList.toggle('is-open', editorOpen);
       c._editorOpen = editorOpen;
     }
     // Resume later / Unflag. Not derived from `s` at all: the flag lives in a file
@@ -1505,10 +1728,11 @@
   Store.onUsage(updateUsageMeters);
   initNewSessionPopup();
   initConfirmPopup();
+  initEndedPanel();
   initResumePopup();
   // Registered once at load, not in activate(): a session can end while the detail
   // view is on screen, and the offer must still reach the developer.
-  Store.onEditorPrompt(queueEditorPrompt);
+  Store.onSessionEnded(queueSessionEnded);
 
   window.ViewSessions = {
     id: 'sessions',
@@ -1525,8 +1749,8 @@
     setStateFilter: setStateFilter,
     openNewSession: openNewSessionPopup,
     openResume: openResumePopup,
-    // Exposed for scripts/render-check.mjs, which drives the end-of-session offer
+    // Exposed for scripts/render-check.mjs, which drives the end-of-session panel
     // without needing a real session to end.
-    editorPrompt: queueEditorPrompt
+    sessionEnded: queueSessionEnded
   };
 })();
