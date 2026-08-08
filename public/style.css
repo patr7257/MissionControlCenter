@@ -384,22 +384,26 @@
 .pop-body { padding: 16px; display: grid; gap: 14px; }
 .fld { display: grid; gap: 7px; }
 .fld > label { font: 650 10.5px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
-/* The cascading folder chain must stay on ONE row. With flex-wrap the 4th select
-   dropped to a new line the moment a third level was picked, so deepening the
-   chain read as the picker breaking. min-width: 0 is the load-bearing half: a
-   flex item defaults to min-width:auto, which on a <select> resolves to its
-   content width, so a long folder name forced the row wider than the panel
-   instead of shrinking the control. Same trap as the .session-card
-   minmax(0, 1fr) note in CLAUDE.md, and just as invisible to static review. */
-.chain { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center; }
-.chain > .sel { flex: 1 1 0; min-width: 0; width: auto; }
+/* The cascading folder chain must stay on ONE row AND never resize as it
+   deepens. It was flex with `flex: 1 1 0`, which kept one row but redistributed
+   the width on every new level, so picking a third or fourth folder shrank every
+   select already on screen and the whole panel reshaped under the cursor.
+   A grid of exactly MAX_SELECTORS (view-sessions.js) equal tracks fixes the
+   geometry up front: level 1 renders at the same width it will still have at
+   level 5, and adding a level fills the next track instead of squeezing its
+   neighbours. minmax(0, 1fr) is the load-bearing half, and it is the same trap as
+   the .session-card minmax(0, 1fr) note in CLAUDE.md: a track sized `auto`, or a
+   flex item's default min-width:auto, resolves on a <select> to its CONTENT
+   width, so one long folder name forces the row wider than the panel instead of
+   shrinking the control. Invisible to static review either way. */
+.chain { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; align-items: center; }
+.chain > .sel { min-width: 0; width: auto; }
 /* Graceful degradation: at phone-ish widths five equal tracks would be ~55px
-   slivers, so wrapping comes back with a real basis (about 2 per row) rather than
-   staying on one unreadable line. Deliberately not an overflow-x scroller: that
-   is defensible for one unsplittable control, not for fields that must be SET. */
+   slivers, so the row breaks into two per row rather than staying on one
+   unreadable line. Deliberately not an overflow-x scroller: that is defensible
+   for one unsplittable control, not for fields that must be SET. */
 @media (max-width: 560px) {
-  .chain { flex-wrap: wrap; }
-  .chain > .sel { flex: 1 1 140px; }
+  .chain { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .sel, .inp {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
@@ -418,14 +422,37 @@
 .sel:focus, .inp:focus, .gobtn:focus-visible, .ghostbtn:focus-visible {
   outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,156,255,0.25);
 }
-/* ---- New session popup: wider than the rest of the .pop family because the
-   cascading folder chain needs 3 to 4 selects on ONE row (see .chain above).
-   Deliberately a popup-specific cap and never a change to .pop itself, which
-   would widen the confirm and the Settings dialog too. 760px gives four tracks of
-   (760 - 32 body padding - 24 gaps) / 4 = 176px, and five (the picker's
-   MAX_SELECTORS) about 139px. Under a ~792px viewport the backdrop's own 16px
-   padding already bounds the panel, so this cap is inert on a phone. ---- */
-.pop.newsession-pop { max-width: 760px; }
+/* ---- New session popup: a FIXED size, and wider than the rest of the .pop
+   family, because the cascading folder chain needs all five of its slots on ONE
+   row from the moment the popup opens (see .chain above). A `width` rather than
+   the old `max-width: 760px` cap is the point: with a cap the panel grew as the
+   chain deepened, so the dialog moved and resized under the cursor mid-pick.
+   920px gives five tracks of (920 - 32 body padding - 32 gaps) / 5 = 171px, a
+   touch wider than the four-track 176px the 760px cap used to reach, so nothing
+   got harder to read in exchange. max-width: 100% keeps the fixed width inert
+   below a ~952px viewport, where the backdrop's own 16px padding bounds the panel
+   anyway. Deliberately popup-specific and never a change to .pop itself, which
+   would widen the confirm, the ended panel and the Settings dialog too. ---- */
+.pop.newsession-pop { width: 920px; max-width: 100%; }
+/* Tinted with --go, the green of the "New session" button that opens it, so the
+   dialog visibly belongs to its own control instead of reading as the same
+   neutral surface as the confirm and the Settings popup. The highlight is two
+   extra shadow layers over the existing drop shadow: a tight 1px green line that
+   traces the panel, and a soft outer glow that separates it from the dimmed board
+   behind. Scoped to this popup only. */
+.pop.newsession-pop {
+  border-color: color-mix(in srgb, var(--go) 42%, var(--line));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--go) 34%, transparent),
+    0 0 34px color-mix(in srgb, var(--go) 22%, transparent),
+    0 24px 60px rgba(0, 0, 0, 0.55);
+}
+.newsession-pop .pop-head,
+.newsession-pop .pop-foot {
+  background: color-mix(in srgb, var(--go) 7%, var(--panel-3));
+  border-color: color-mix(in srgb, var(--go) 26%, var(--line));
+}
+.newsession-pop .pop-head b { color: color-mix(in srgb, var(--go) 34%, var(--text)); }
 /* ---- Resume session: the amber twin of the green New session button. Amber
    because it is a "pick something back up" action rather than a fresh start, and
    it shares .gobtn's geometry so the pair reads as one control group. ---- */

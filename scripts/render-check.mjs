@@ -558,6 +558,20 @@ try {
   // moment a third level was picked, so deepening the chain read as the picker
   // breaking. Only real geometry proves it, the same reason the card geometry loop
   // above exists. Walk the chain down to its deepest level first.
+  //
+  // Measured BEFORE the walk, so it can be compared with the same numbers after:
+  // the panel and the first select must be exactly the same size at depth 1 and at
+  // depth 4. That is the whole point of the fixed width plus the 5-track grid, and
+  // it is the kind of thing no amount of reading the CSS settles.
+  const beforeWalk = await cdp.eval(`(function () {
+    var host = document.getElementById('newSessionSelectors');
+    return {
+      depth: host.children.length,
+      firstW: Math.round(host.children[0].getBoundingClientRect().width),
+      panelW: Math.round(document.getElementById('newSessionPopup').getBoundingClientRect().width)
+    };
+  })()`);
+
   const chainDepth = await cdp.eval(`(function () {
     var host = document.getElementById('newSessionSelectors');
     var first = host.children[0];
@@ -579,6 +593,25 @@ try {
     return host.children.length;
   })()`);
   check('the folder chain cascades four levels deep', chainDepth === 4, String(chainDepth));
+
+  const afterWalk = await cdp.eval(`(function () {
+    var host = document.getElementById('newSessionSelectors');
+    return {
+      depth: host.children.length,
+      firstW: Math.round(host.children[0].getBoundingClientRect().width),
+      panelW: Math.round(document.getElementById('newSessionPopup').getBoundingClientRect().width)
+    };
+  })()`);
+  check('deepening the folder chain does not resize the popup',
+    beforeWalk.panelW === afterWalk.panelW && afterWalk.panelW === 920,
+    JSON.stringify({ beforeWalk, afterWalk }));
+  // Note the chain is already a couple of levels deep here (DEFAULT_REPO_CHAIN
+  // preselects, and the account-override test above picked a folder), so this
+  // asserts the chain GREW rather than starting from one, and that the first
+  // select is byte-identical in width across that growth.
+  check('deepening the folder chain does not shrink the selects already on screen',
+    afterWalk.depth > beforeWalk.depth && beforeWalk.firstW === afterWalk.firstW,
+    JSON.stringify({ beforeWalk, afterWalk }));
 
   async function chainGeometry() {
     return cdp.eval(`(function () {
@@ -615,15 +648,39 @@ try {
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   await new Promise((r) => setTimeout(r, 250));
 
-  // Only the New session popup may get the wider cap: the base .pop rule also
-  // feeds the confirm and the Settings dialog, so widening it would widen those.
-  // max-width resolves even on a panel whose backdrop is display:none.
+  // Only the New session popup may get the fixed wider size: the base .pop rule
+  // also feeds the confirm and the Settings dialog, so changing it there would
+  // change those. Both properties resolve even on a panel whose backdrop is
+  // display:none. The New session panel is the one that must read as a fixed
+  // `width`; the others keep their max-width caps and no width of their own.
   const caps = await cdp.eval(`(function () {
-    var mw = function (id) { var e = document.getElementById(id); return e ? getComputedStyle(e).maxWidth : null; };
-    return { newSession: mw('newSessionPopup'), confirm: mw('confirmPopup'), settings: mw('settingsPopup') };
+    var css = function (id, prop) { var e = document.getElementById(id); return e ? getComputedStyle(e)[prop] : null; };
+    return {
+      newSessionW: css('newSessionPopup', 'width'), newSessionMax: css('newSessionPopup', 'maxWidth'),
+      confirm: css('confirmPopup', 'maxWidth'), settings: css('settingsPopup', 'maxWidth'),
+      confirmW: css('confirmPopup', 'width')
+    };
   })()`);
-  check('only the New session popup got the wider cap',
-    caps.newSession === '760px' && caps.confirm === '430px' && caps.settings === '560px', JSON.stringify(caps));
+  check('only the New session popup got the fixed wider size',
+    caps.newSessionW === '920px' && caps.newSessionMax === '100%' &&
+      caps.confirm === '430px' && caps.settings === '560px' && caps.confirmW !== '920px',
+    JSON.stringify(caps));
+
+  // The green treatment is what makes the dialog readable against the dimmed
+  // board. Asserting the computed border colour differs from the neutral one the
+  // confirm still uses catches a scope slip in either direction (tint lost, or
+  // tint leaking onto the .pop base rule and colouring every dialog).
+  const tint = await cdp.eval(`(function () {
+    var bc = function (id) { var e = document.getElementById(id); return e ? getComputedStyle(e).borderTopColor : null; };
+    var ns = document.getElementById('newSessionPopup');
+    // One colour token per shadow layer. Matching colour FUNCTIONS rather than
+    // rgba( specifically, because a color-mix() value computes to color(srgb ...)
+    // in Chromium and an rgba-only count silently reads as one layer.
+    var layers = (getComputedStyle(ns).boxShadow.match(/(?:rgba?|color|oklch|hsla?)\\(/g) || []).length;
+    return { newSession: bc('newSessionPopup'), confirm: bc('confirmPopup'), shadowLayers: layers };
+  })()`);
+  check('the New session popup is tinted and highlighted, and only it is',
+    tint.newSession !== tint.confirm && tint.shadowLayers >= 3, JSON.stringify(tint));
 
   // The footer's .path eats every spare pixel, so a two-word button label broke
   // onto a second line and made that button taller than its neighbours. Compare
