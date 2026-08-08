@@ -99,6 +99,23 @@ function postToServer(rawBody) {
   }
 }
 
+// Environment for the ORIGINAL statusline command, with ELECTRON_RUN_AS_NODE
+// removed. In a packaged install this script is launched by
+// desktop/assets/statusline-feed.mjs.cmd, which sets that variable so the
+// Electron binary runs as plain Node. The variable would otherwise be inherited
+// by the child below, and if the user's real statusline command is itself an
+// Electron app it would then run as a bare Node interpreter, try to require its
+// own entry point and exit without printing: a silently blank statusline with no
+// clue why. Exactly the bug editorSpawnEnv() in terminal.mjs guards against for
+// VS Code. Deliberately NOT exported the way editorSpawnEnv() is: importing this
+// module runs the stdin wiring below, so a test that imported it would hang.
+// scripts/check-statusline-feed.mjs proves this by really spawning the wrapper.
+function originalSpawnEnv(base) {
+  const env = { ...(base || process.env) };
+  delete env.ELECTRON_RUN_AS_NODE;
+  return env;
+}
+
 // Read stdin fully (it is the statusLine JSON payload Claude Code piped in),
 // then kick off the monitor POST and the original command in parallel.
 let body = '';
@@ -132,7 +149,11 @@ process.stdin.on('end', () => {
     // itself would run it (a full command line, e.g.
     // python "C:\Users\pr\.claude\statusline-command.py"), including a path
     // with spaces.
-    const child = spawn(originalCommand, { shell: true, stdio: ['pipe', 'inherit', 'inherit'] });
+    const child = spawn(originalCommand, {
+      shell: true,
+      stdio: ['pipe', 'inherit', 'inherit'],
+      env: originalSpawnEnv(),
+    });
     child.on('error', () => {
       // Could not even spawn the original: fail open, print nothing.
       process.exit(0);

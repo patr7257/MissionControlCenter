@@ -31,6 +31,12 @@ extraResources:
       - public/**
   - from: assets/send-event.mjs.cmd
     to: backend/send-event.mjs.cmd
+  # The statusline twin of the hook shim. Without it settings.statusLine keeps
+  # pointing at "node <path>" on a machine that may have no system Node, so the
+  # quota bars and the context rings never populate in an MSI install.
+  # scripts/check-desktop-package.mjs asserts every assets/*.cmd is mapped here.
+  - from: assets/statusline-feed.mjs.cmd
+    to: backend/statusline-feed.mjs.cmd
 win:
   target:
     - msi

@@ -66,6 +66,11 @@ async function ensureHooks() {
       // install-hooks.mjs honours this override so the recorded hook command
       // points at the shipped shim wrapper instead of "node <repo path>".
       process.env.CMC_HOOK_COMMAND = `"${path.join(BACKEND, 'send-event.mjs.cmd')}"`;
+      // Same idea for the statusLine command, which is the ONLY local source of
+      // the 5h/7d rate-limit windows and the true context-window percentage.
+      // Without this a packaged install leaves settings.statusLine pointing at
+      // "node <path>", so the quota bars and the context rings stay blank.
+      process.env.CMC_STATUSLINE_COMMAND = `"${path.join(BACKEND, 'statusline-feed.mjs.cmd')}"`;
     }
     const mod = await import(pathToFileURL(path.join(BACKEND, 'install-hooks.mjs')).href);
     return mod.addHooks();

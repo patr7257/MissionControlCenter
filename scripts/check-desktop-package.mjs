@@ -49,6 +49,24 @@ function readFilesPatterns(yamlText) {
   return patterns;
 }
 
+// The `from:` values of the extraResources block. Same deliberate non-parser as
+// readFilesPatterns above: it only understands the shape this file actually uses
+// (a list of `- from: X` / `to: Y` pairs) and reports rather than guesses.
+function readExtraResourceFroms(yamlText) {
+  const lines = yamlText.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^extraResources:\s*$/.test(l));
+  if (start === -1) return null;
+  const froms = [];
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (/^\s*#/.test(line) || /^\s*$/.test(line)) continue;
+    if (/^\S/.test(line)) break;
+    const m = /^\s+-?\s*from:\s*(.+?)\s*$/.exec(line);
+    if (m) froms.push(m[1].replace(/^["']|["']$/g, ''));
+  }
+  return froms;
+}
+
 // Only the forms electron-builder is given here: an exact filename, or *.ext.
 function matchesPattern(fileName, pattern) {
   if (pattern === fileName) return true;
@@ -123,6 +141,39 @@ if (patterns) {
   if (preloadNamed) {
     check('preload.cjs is matched by the files: list',
       patterns.some((p) => matchesPattern('preload.cjs', p)), JSON.stringify(patterns));
+  }
+}
+
+// ---- The .cmd shims under desktop/assets are the second way a packaging
+// omission ships dead, and it is quieter than the ERR_MODULE_NOT_FOUND above:
+// the app still starts, it just silently loses a feature. send-event.mjs.cmd is
+// how a packaged install registers hooks at all, and statusline-feed.mjs.cmd is
+// what feeds the quota bars and the context rings. Neither is imported by
+// anything, so the walk above cannot see them; they only ship if extraResources
+// names them explicitly.
+const ASSETS = path.join(DESKTOP, 'assets');
+const froms = readExtraResourceFroms(yamlText);
+check('electron-builder.yml has a readable extraResources block',
+  Array.isArray(froms) && froms.length > 0, JSON.stringify(froms));
+
+if (froms) {
+  let shims = [];
+  try {
+    shims = fs.readdirSync(ASSETS).filter((f) => f.toLowerCase().endsWith('.cmd'));
+  } catch {
+    shims = [];
+  }
+  check('desktop/assets holds at least one .cmd shim', shims.length > 0, ASSETS);
+  for (const shim of shims) {
+    check(`assets/${shim} is copied by extraResources, so it ships in the MSI`,
+      froms.includes(`assets/${shim}`), `from: values: ${JSON.stringify(froms)}`);
+  }
+  // The reverse direction: a `from:` naming a file that is not there would copy
+  // nothing and fail the same silent way.
+  for (const from of froms) {
+    if (!from.startsWith('assets/')) continue;
+    check(`the extraResources source ${from} exists on disk`,
+      fs.existsSync(path.join(DESKTOP, from)), path.join(DESKTOP, from));
   }
 }
 
