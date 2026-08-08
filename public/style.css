@@ -830,6 +830,34 @@
 
 header { gap: 16px; }
 header h1 .dot { filter: drop-shadow(0 0 6px var(--accent)); }
+/* The Claude mark, standing where the status bullet used to (index.html). It is
+   a real <button> because clicking it plays the theme (public/tune.js), so the
+   reset here is what keeps it looking like the glowing bullet it replaced rather
+   than like a control. Sized and glowing exactly as .dot did, so the header
+   needed no layout change. */
+header h1 { display: inline-flex; align-items: center; gap: 8px; }
+.claude-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; border: 0; background: transparent; cursor: pointer; line-height: 0;
+  color: var(--accent); filter: drop-shadow(0 0 6px var(--accent));
+  transition: color 0.18s ease, transform 0.18s ease, filter 0.18s ease;
+}
+.claude-mark:hover { transform: scale(1.12); }
+.claude-mark:focus-visible {
+  outline: none; border-radius: 6px;
+  box-shadow: 0 0 0 3px rgba(91, 156, 255, 0.35);
+}
+/* Playing: brighter, warmer, and turning. The rotation is the only thing that
+   says "still going" once the tune is a few bars in. */
+.claude-mark.playing {
+  color: var(--go);
+  filter: drop-shadow(0 0 10px var(--go));
+  animation: claudeSpin 6s linear infinite;
+}
+@keyframes claudeSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
 
 /* Attention pill in the header: shown when sessions are blocked on the user.
    It is now a filter control (clicking it switches Show to Needs input), so
@@ -917,6 +945,7 @@ header h1 .dot { filter: drop-shadow(0 0 6px var(--accent)); }
    also stills the whole office (day/night wash, props, idle breathing, desk
    FX, orchestrator sway, threads, confetti) so it becomes a calm static scene. */
 @media (prefers-reduced-motion: reduce) {
+  .claude-mark.playing,
   .attention,
   .session-card.status-needs-permission,
   .session-card.status-awaiting,

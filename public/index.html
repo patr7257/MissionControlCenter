@@ -9,7 +9,28 @@
 </head>
 <body>
   <header>
-    <h1><span class="dot">&#9679;</span> Mission Control Center</h1>
+    <!-- The Claude mark stands where the status bullet used to, so the header
+         layout is unchanged. It is a real button because it does something
+         (see public/tune.js), which also makes it keyboard reachable. No title
+         attribute on purpose: an easter egg that announces itself on hover is
+         not one. -->
+    <h1>
+      <button class="claude-mark" id="claudeMark" type="button" aria-pressed="false" aria-label="Play the Mission Control theme">
+        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" focusable="false">
+          <g fill="currentColor">
+            <path d="M11.1 2.2h1.8l.55 7.2-.65.35-1.6-.05-.65-.35z"></path>
+            <path d="M12.9 21.8h-1.8l-.55-7.2.65-.35 1.6.05.65.35z"></path>
+            <path d="M2.2 12.9v-1.8l7.2-.55.35.65-.05 1.6-.35.65z"></path>
+            <path d="M21.8 11.1v1.8l-7.2.55-.35-.65.05-1.6.35-.65z"></path>
+            <path d="M4.66 5.93l1.27-1.27 5.1 5.13-.19.72-1.16 1.1-.73.15z"></path>
+            <path d="M19.34 18.07l-1.27 1.27-5.1-5.13.19-.72 1.16-1.1.73-.15z"></path>
+            <path d="M5.93 19.34l-1.27-1.27 5.13-5.1.72.19 1.1 1.16.15.73z"></path>
+            <path d="M18.07 4.66l1.27 1.27-5.13 5.1-.72-.19-1.1-1.16-.15-.73z"></path>
+          </g>
+        </svg>
+      </button>
+      Mission Control Center
+    </h1>
     <div class="conn" id="conn"><span class="led"></span><span id="connText">connecting</span></div>
     <button class="attention" id="attention" type="button" style="display:none" title="Switch to Needs input and jump to the sessions waiting for you">
       <span class="att-dot"></span><span id="attCount">0</span> need input
@@ -235,6 +256,7 @@
   <script src="/humaaans.js"></script>
   <script src="/view-office.js"></script>
   <script src="/demo.js"></script>
+  <script src="/tune.js"></script>
   <script src="/shortcuts.js"></script>
   <script>
     (function () {
@@ -285,6 +307,20 @@
         window.scrollTo({ top: 0, behavior: 'smooth' });
       });
       document.getElementById('newSessionOpenBtn').addEventListener('click', function () { ViewSessions.openNewSession(); });
+
+      // The Claude mark: click to play the theme, click again to stop. The
+      // pressed state is painted from Tune's own callback rather than toggled on
+      // click, so a browser that refuses to start audio cannot leave the button
+      // claiming it is playing.
+      (function wireClaudeMark() {
+        var mark = document.getElementById('claudeMark');
+        if (!mark || typeof Tune === 'undefined') return;
+        Tune.onChange(function (playing) {
+          mark.classList.toggle('playing', !!playing);
+          mark.setAttribute('aria-pressed', playing ? 'true' : 'false');
+        });
+        mark.addEventListener('click', function () { Tune.toggle(); });
+      })();
 
       // ---- Stats dashboard popup: the 4 header tiles (sessions/board or
       // working/done/steps/elapsed detail, see Store.setStats) moved off the

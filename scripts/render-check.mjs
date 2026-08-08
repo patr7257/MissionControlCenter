@@ -1643,6 +1643,37 @@ try {
   check('the whole quota stat row is one type size, labels and values alike',
     quotaAge.stats.length === 3 && new Set(quotaSizes).size === 1, JSON.stringify(quotaAge.stats));
 
+  // ---- The Claude mark (issue #39). The audio itself cannot be asserted here:
+  // there is no audio device behind a headless Chromium, so what is checked is
+  // the contract around it. The pressed state is painted from Tune's own
+  // callback, never toggled optimistically on click, so a refused AudioContext
+  // leaves the button reading "not playing" rather than lying.
+  const mark = await cdp.eval(`(function () {
+    var el = document.getElementById('claudeMark');
+    if (!el) return { missing: true };
+    var before = { pressed: el.getAttribute('aria-pressed'), playing: el.classList.contains('playing') };
+    el.click();
+    var on = { pressed: el.getAttribute('aria-pressed'), playing: el.classList.contains('playing'), tune: Tune.isPlaying() };
+    el.click();
+    var off = { pressed: el.getAttribute('aria-pressed'), playing: el.classList.contains('playing'), tune: Tune.isPlaying() };
+    Tune.stop();
+    return {
+      tag: el.tagName, label: el.getAttribute('aria-label'), title: el.getAttribute('title'),
+      focusable: el.tabIndex >= 0, before: before, on: on, off: off
+    };
+  })()`);
+  check('the header carries a focusable Claude mark button', mark.tag === 'BUTTON' && mark.focusable === true,
+    JSON.stringify(mark));
+  check('it starts unpressed and announces itself only to a screen reader',
+    mark.before && mark.before.pressed === 'false' && !mark.before.playing && !!mark.label && !mark.title,
+    JSON.stringify(mark));
+  check('clicking it starts the tune and the button follows the audio, not the click',
+    mark.on && mark.on.tune === true && mark.on.pressed === 'true' && mark.on.playing === true,
+    JSON.stringify(mark.on));
+  check('clicking it again stops the tune and clears the pressed state',
+    mark.off && mark.off.tune === false && mark.off.pressed === 'false' && mark.off.playing === false,
+    JSON.stringify(mark.off));
+
   const errs = cdp.jsErrors();
   check('no JS or console errors on the board', errs.length === 0, errs.slice(0, 5).join(' | '));
 
