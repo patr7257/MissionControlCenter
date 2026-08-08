@@ -55,3 +55,9 @@ jobs:
       # HOME, because its command surface is the contract the skill depends on.
       - name: Resume-flag CLI check
         run: node scripts/check-flag-resume.mjs
+
+      # The statusline wrapper, spawned for real: it must forward the wrapped
+      # command's stdout and exit code, pipe stdin through, and never leak
+      # ELECTRON_RUN_AS_NODE (set by the packaged app's .cmd shim) into it.
+      - name: Statusline wrapper check
+        run: node scripts/check-statusline-feed.mjs
