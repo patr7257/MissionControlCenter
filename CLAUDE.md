@@ -45,7 +45,8 @@ See `docs/plans/` and `docs/specs/` for the design and roadmap.
   were installed is never clobbered.
 - Front-end (`public/`): `store.js` (data + SSE + view registry), `view-cards.js` (professional
   lanes) and `view-office.js` (2.5D office scene), `humaaans.js` (recolorable character SVG
-  templates), `style.css`, `index.html` (shell). There is no top-level Pro/Office toggle: the two
+  templates), `tune.js` (the header mark's theme, see its own section), `style.css`, `index.html`
+  (shell). There is no top-level Pro/Office toggle: the two
   registered views are `sessions` (the board) and `detail` (a single combined per-session view that
   renders the lanes AND the office scene together in `#viewDetail`). The combined view delegates to
   `ViewCards` and `ViewOffice` (defined in their files but no longer registered separately) and is
@@ -153,11 +154,6 @@ common case.
 restart does not desync `tabIndex` from the real tab positions in a still-open managed window.
 
 Still pending (not code-complete):
-- **Packaged desktop installs cannot feed the statusline yet.** The quota meters and the
-  context-window rings stay blank in an MSI install until a `statusline-feed.mjs.cmd`
-  Electron-as-node wrapper exists in `desktop/assets/`, mirroring `send-event.mjs.cmd`, and
-  `desktop/main.mjs` sets `CMC_STATUSLINE_COMMAND` to it the way it already sets
-  `CMC_HOOK_COMMAND`. Running the repo copy (`node start.mjs`) is unaffected and does feed it.
 - **`wt focus-tab` against a COLD managed window**, and whether the `SetForegroundWindow` nudge truly
   raises the window versus only flashing the taskbar icon while the app is in the background. Both
   are best effort by design; everything else in the launch/focus/reattach path is now confirmed by
@@ -373,16 +369,33 @@ there and therefore the only footer button behind the in-app confirm.
 - It is a force kill: no `SessionEnd` hook runs, so `/close-session` raises the end-of-session panel
   itself (deduped against the registry watcher, which notices the same thing 2.5s later).
 
-**The New session popup is wider for this** (`.pop.newsession-pop { max-width: 760px }`, a
-popup-specific cap so the confirm and Settings dialogs keep theirs). `.chain` is now `nowrap` with
-`.chain > .sel { flex: 1 1 0; min-width: 0 }`, re-wrapping only under 560px. `min-width: 0` is the
-load-bearing half: a flex item defaults to `min-width: auto`, which on a `<select>` resolves to its
-content width, so a long folder name forced the row wider than the panel instead of shrinking the
-control (the same trap as the `.session-card` `minmax(0, 1fr)` note below). `.ghostbtn` gained
-`white-space: nowrap` because the footer's `.path` takes every spare pixel and "VS Code" broke onto
-two lines. `scripts/render-check.mjs` asserts the four-deep chain sits on one row at 700px and up,
-never overflows the panel at any width, that only this popup got the wider cap, and that the footer
-buttons stay one equal-height row.
+**The New session popup is a FIXED size, and it is the only tinted one** (issue #40, 2026-08-08).
+`.pop.newsession-pop { width: 920px; max-width: 100% }`, a popup-specific rule so the confirm, the
+ended panel and the Settings dialog keep their own caps.
+- **A `width`, not the old `max-width: 760px` cap, and that swap is the whole fix.** With a cap the
+  panel grew as the folder chain deepened, so picking a third or fourth level resized the dialog
+  under the cursor. `max-width: 100%` keeps the fixed width inert below a ~952px viewport, where the
+  backdrop's own 16px padding bounds the panel anyway.
+- **`.chain` is a grid of exactly five tracks** (`repeat(5, minmax(0, 1fr))`), one per `MAX_SELECTORS`
+  in `view-sessions.js`, not the flex `flex: 1 1 0` it used to be. Flex kept one row but
+  redistributed the width on every new level, so each level shrank the selects already on screen.
+  Five fixed tracks mean level 1 renders at the width it will still have at level 5, and a new level
+  fills the next track. The trailing empty tracks are the price of nothing ever moving, and they are
+  the point rather than a bug. `minmax(0, 1fr)` is still load-bearing for the same reason
+  `.session-card` uses it: an `auto` track (or a flex item's default `min-width: auto`) resolves on a
+  `<select>` to its CONTENT width, so one long folder name forces the row wider than the panel. Under
+  560px it degrades to two tracks per row, as the flex version wrapped.
+- **Tinted with `--go`**, the green of the `.gobtn` that opens it, plus a two-layer highlight (a tight
+  1px line and a soft outer glow) over the existing drop shadow, so the dialog is easy to pick out
+  against the dimmed board and visibly belongs to its own control.
+- `.ghostbtn` has `white-space: nowrap` because the footer's `.path` takes every spare pixel and
+  "VS Code" broke onto two lines.
+- `scripts/render-check.mjs` asserts the four-deep chain sits on one row at 700px and up, never
+  overflows the panel at any width, that the panel width and the FIRST select's width are unchanged
+  across the walk from a shallow chain to the deepest one (the actual property being asked for), that
+  only this popup got the fixed wider size and the tint, and that the footer buttons stay one
+  equal-height row. Note a `color-mix()` value computes to `color(srgb ...)` in Chromium, so counting
+  box-shadow layers by `rgba(` alone silently reads as one layer.
 
 ## Runtime ring, quota bars, and why `startedAt` is what it is
 Two gauges, one severity language (the shared `.lo`/`.mid`/`.hi` ramp, see the card notes below):
@@ -497,9 +510,24 @@ snapshot carries `usage: { fiveHour:{pct,resetsAt}, sevenDay:{pct,resetsAt}, at 
 there is a new `{ type:'usage' }` SSE frame. Known and accepted: the statusline only re-runs when a
 session renders, so with everything idle the quota freezes; the UI dims the meters and shows an age
 once `usage.at` is over 5 minutes old rather than implying the number is current. A `refreshInterval`
-was deliberately NOT added (it would boot a node process per session every N seconds). Packaged
-desktop installs still need a `statusline-feed.mjs.cmd` Electron-as-node wrapper, mirroring
-`send-event.mjs.cmd`, before the meters populate there.
+was deliberately NOT added (it would boot a node process per session every N seconds).
+
+**Packaged installs feed it too** (issue #41, 2026-08-08). `desktop/assets/statusline-feed.mjs.cmd`
+is the statusline twin of the hook shim and `desktop/main.mjs` points `CMC_STATUSLINE_COMMAND` at it
+when `app.isPackaged`, exactly as it already does for `CMC_HOOK_COMMAND`. Three details, none of them
+optional:
+- **The wrapper ends `exit /b %ERRORLEVEL%`, NOT `exit /b 0`.** The hook shim is fire-and-forget; this
+  one runs the user's real statusline and must report its exit code.
+- **`ELECTRON_RUN_AS_NODE` is stripped from the child's env in `statusline-feed.mjs`.** The `.cmd`
+  sets it so the Electron binary runs as node, and an inherited value would make an Electron-based
+  statusline command run as a bare Node interpreter and print nothing: the same class of bug
+  `editorSpawnEnv()` in `terminal.mjs` guards against for VS Code. The helper is deliberately NOT
+  exported the way `editorSpawnEnv()` is, because importing this module runs its stdin wiring and a
+  test that imported it would hang. `scripts/check-statusline-feed.mjs` proves it by really spawning.
+- **A `.cmd` shim only ships if `extraResources` names it**, and a missing one is quieter than the
+  `ERR_MODULE_NOT_FOUND` that killed 0.1.10: the app starts fine and silently loses a feature.
+  `scripts/check-desktop-package.mjs` now asserts every `desktop/assets/*.cmd` is mapped, and that
+  every mapped source exists on disk.
 
 ## Status freshness: why a card used to lie about needing input
 Claude Code notifies when it ASKS for permission and never when you ANSWER, and `PreToolUse` for
@@ -678,6 +706,32 @@ app's back/forward history and the Settings popup.
   the terminal, `:focus-visible` ring). Before this, Tab skipped every card and the primary action
   was mouse-only.
 
+## The Claude mark and the theme tune (`public/tune.js`, issue #39)
+The status bullet before the header title is an inline-SVG Claude starburst inside a real
+`<button id="claudeMark">`. Click it and the theme plays, click again and it stops. Same spot and
+same glow as the bullet it replaced, so the header layout is unchanged, and it carries no `title`
+attribute on purpose: an easter egg that announces itself on hover is not one.
+- **Synthesised, never streamed, and that is a constraint decision rather than a shortcut.** The
+  issue offered the Spotify dev app from `patr7257/music-timeline-quiz`; that needs a CDN script, an
+  OAuth round trip, a Premium session and live network, against this repo's hard rule of zero runtime
+  dependencies, no external calls, fully offline. So the issue's own fallback shipped: about 1KB of
+  oscillators, no asset, no request, no permission prompt. **The honest limit is that the Web Audio
+  API makes tones and cannot sing**, so this is the instrumental hook, not the vocal. The recording
+  itself would mean committing an audio file, which is a separate decision.
+- **The `AudioContext` is built on the first click** (browsers require a gesture before any sound),
+  wrapped in a try/catch, and `start()` returns false on failure, so a machine with no audio device
+  costs a dead click and nothing else.
+- **The button's pressed state is painted from `Tune.onChange`, never toggled on click**, so a
+  refused context cannot leave the mark claiming to play. `index.html` wires exactly that.
+- **The loop schedules ONE phrase ahead**, not the whole thing, so stopping is a cancelled timer plus
+  a short gain ramp rather than chasing hundreds of live oscillators. The ramp matters: yanking the
+  master gain to zero clicks audibly.
+- `.claude-mark.playing` spins the mark and is listed in the existing `prefers-reduced-motion` block,
+  like every other animation in the app.
+- `render-check.mjs` covers everything around the audio (focusable button, starts unpressed, state
+  follows `Tune` in both directions) because that is all that is provable headlessly; **whether it
+  actually sounds good is a human check.**
+
 ## Verification tooling
 - `node scripts/smoke-server.mjs` - hermetic temp HOME, boots the server, checks the endpoints, hook
   ingestion, statusline ingestion, registry reconciliation and launch command shapes. Runs in CI. It
@@ -696,6 +750,12 @@ app's back/forward history and the Settings popup.
 - `node scripts/check-flag-resume.mjs` - really spawns `scripts/flag-resume.mjs` against a hermetic
   HOME and asserts the whole flag lifecycle plus its failure modes. Runs in CI. The CLI surface is the
   contract the `/resume-later` skill depends on, so it is tested as a CLI, not by importing pieces.
+- `node scripts/check-statusline-feed.mjs` - really spawns `statusline-feed.mjs` against a hermetic
+  HOME and asserts the wrapper's whole process contract: the wrapped command's stdout is forwarded,
+  its exit code is adopted, stdin is piped through, `ELECTRON_RUN_AS_NODE` never reaches it, and the
+  three record outcomes (a real command, `{had:false}`, missing/unreadable) stay distinct. Runs in
+  CI. It cannot IMPORT the module: that would run its stdin wiring and hang, which is also why the
+  env helper there is not exported.
 - `node scripts/check-installer-launch.mjs` - spawns the updater's real install command with a
   stand-in for msiexec and asserts the MSI path arrives unmangled. Windows only (it is Windows
   quoting under test) and SKIPS with exit 0 elsewhere, but CI runs on `windows-latest`, so it really
@@ -719,8 +779,9 @@ app's back/forward history and the Settings popup.
   covers the VS Code button and the card's `Resume later` toggle (one POST per double click,
   sessionId only, the right endpoint for each state, no stray `/focus`, no confirm), the
   `Close session` confirm (cancel POSTs nothing, confirm POSTs once), the end-of-session panel (only
-  OK dismisses, each action flips to its opposite, two endings queue) and the New session popup's
-  one-row folder chain. Now 152 assertions.
+  OK dismisses, each action flips to its opposite, two endings queue), the New session popup (one-row
+  folder chain, and that neither the panel nor the first select changes width as the chain deepens)
+  and the Claude mark. Now 159 assertions.
 - **A spawn shape can be provably correct and still open nothing.** Both the `ELECTRON_RUN_AS_NODE`
   and the `detached` findings behind "Open in VS Code" passed every static and dry-run check and were
   only exposed by spawning for real and then ENUMERATING WINDOW TITLES (`EnumWindows` +
@@ -855,9 +916,12 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
 builder), on `windows-latest`, which matters: the Windows-only checks below really execute in CI
 rather than skipping. It `node --check`s every `*.mjs` in the repo, boots the server via
 `scripts/smoke-server.mjs` (hermetic temp HOME, checks `/`, `/repos`, `/stream`, one hook event),
-then runs `scripts/check-desktop-package.mjs` (packaging omissions) and
-`scripts/check-installer-launch.mjs` (the updater's install command). Zero-dependency, so there is
-nothing to install, and all four run locally too.
+then runs `scripts/check-desktop-package.mjs` (packaging omissions),
+`scripts/check-installer-launch.mjs` (the updater's install command),
+`scripts/check-flag-resume.mjs` (the `/resume-later` engine) and
+`scripts/check-statusline-feed.mjs` (the statusline wrapper's process contract). Zero-dependency, so
+there is nothing to install, and all six run locally too. `scripts/render-check.mjs` is deliberately
+NOT in CI: it needs a real browser and skips with exit 0 when none is present.
 
 ## Docs
 - `docs/plans/` - implementation plans.
