@@ -885,9 +885,14 @@ one place where npm devDependencies (electron, electron-builder) are allowed. Ke
   stays zero-dependency.
 - Releases are AUTOMATIC on merge to `main` (since 2026-07-30, modelled on `patr7257/todolist`'s
   `build-installers.yml`). `.github/workflows/fleet-desktop-msi.yml` has a `version` job that reads
-  the latest release, bumps the PATCH (`fleet-v0.1.5` -> `fleet-v0.1.6`), then a `msi` job that
-  stamps that version, builds, and publishes the release with the MSI attached. So a merged PR ships
-  a version with no manual step. Details that matter:
+  the latest release, bumps the PATCH (so `fleet-v0.1.N` becomes `fleet-v0.1.N+1`), then a `msi` job
+  that stamps that version, builds, and publishes the release with the MSI attached. So a merged PR
+  ships a version with no manual step. Details that matter:
+  - **NEVER state the current or next version from anything written in this file.** Every version
+    named in these notes is history, frozen at the moment it was written, and the release counter has
+    moved on since. Read it from GitHub every time: `gh release view --json tagName --jq .tagName`,
+    and the next one is that PATCH plus one. Getting this wrong told Patrick a merge would ship
+    0.1.13 when the repo was already on 0.1.18.
   - A merge touching ONLY `*.md`, `docs/`, `.claude/` or `.github/` sets `skip=true` and releases
     nothing, so a typo fix does not mint a version and a 116 MB build.
   - `concurrency: fleet-release` with `cancel-in-progress: false` QUEUES runs, so two quick merges
