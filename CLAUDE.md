@@ -518,8 +518,10 @@ was deliberately NOT added (it would boot a node process per session every N sec
 
 **Packaged installs feed it too** (issue #41, 2026-08-08). `desktop/assets/statusline-feed.mjs.cmd`
 is the statusline twin of the hook shim and `desktop/main.mjs` points `CMC_STATUSLINE_COMMAND` at it
-when `app.isPackaged`, exactly as it already does for `CMC_HOOK_COMMAND`. Three details, none of them
-optional:
+when `app.isPackaged`, exactly as it already does for `CMC_HOOK_COMMAND`. **Confirmed live on
+2026-08-09 from an installed 0.1.20**: the 5 hour bar, the 7 day bar and the per-card context rings
+all populate in a packaged install, which had never been seen working outside the repo copy through
+four sessions of this being the top carried-over item. Three details, none of them optional:
 - **The wrapper ends `exit /b %ERRORLEVEL%`, NOT `exit /b 0`.** The hook shim is fire-and-forget; this
   one runs the user's real statusline and must report its exit code.
 - **The wrapper's child spawn MUST pass `windowsHide: true`, which is the OPPOSITE of the VS Code
@@ -533,7 +535,9 @@ optional:
   `windowsHide` maps to `CREATE_NO_WINDOW`, which suppresses the console only and leaves stdio
   alone, so the wrapped command's stdout still reaches the statusline. Note the same trap waits for
   any FUTURE spawn added to code that runs under the packaged binary: no console is inherited there,
-  so a console child always needs the flag.
+  so a console child always needs the flag. **Fix confirmed live on 2026-08-09 from an installed
+  0.1.20: no windows, and the statusline feed works at the same time**, which is the pair that
+  matters (hiding the console must not cost the feed).
 - **`ELECTRON_RUN_AS_NODE` is stripped from the child's env in `statusline-feed.mjs`.** The `.cmd`
   sets it so the Electron binary runs as node, and an inherited value would make an Electron-based
   statusline command run as a bare Node interpreter and print nothing: the same class of bug
@@ -735,7 +739,7 @@ attribute on purpose: an easter egg that announces itself on hover is not one.
   live network, against this repo's hard rule of zero runtime dependencies, no external calls, fully
   offline. A local file played by a plain `<audio>` element satisfies the constraint AND plays the
   real song, so it wins on every axis. The clip ships in the MSI through the existing `public/**`
-  glob; no packaging change was needed.
+  glob; no packaging change was needed. **Confirmed working from an installed 0.1.20 on 2026-08-09.**
 - **`server.mjs` `CONTENT_TYPES` needed an audio entry**, and this is the non-obvious half. With no
   `.mp3` there the fallback serves the clip as `application/octet-stream`, the browser refuses to
   decode it, and the mark looks correctly wired while doing nothing. `.ogg` is listed alongside so a
