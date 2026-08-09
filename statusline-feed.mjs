@@ -149,8 +149,24 @@ process.stdin.on('end', () => {
     // itself would run it (a full command line, e.g.
     // python "C:\Users\pr\.claude\statusline-command.py"), including a path
     // with spaces.
+    //
+    // windowsHide is MANDATORY here, and it is the opposite of the rule for
+    // VS Code in terminal.mjs (editorSpawnOptions), so read both before
+    // touching either. There, hiding is banned because Code.exe is a GUI app
+    // and STARTUPINFO.wShowWindow=SW_HIDE swallows its own first window
+    // (issue #33). Here the child is a console-subsystem process (cmd.exe plus
+    // whatever the user's statusline runs), and the parent has NO console to
+    // lend it: packaged, this script runs inside the Electron binary, which is
+    // GUI-subsystem, so Windows creates a fresh console for the child. On
+    // Windows 11 the default console host is Windows Terminal, so that is an
+    // entire terminal WINDOW, and Claude Code re-renders the statusline on
+    // roughly every message and tool result. Without this flag 0.1.19 flooded
+    // the desktop until it crashed. windowsHide maps to CREATE_NO_WINDOW,
+    // which suppresses the console only: stdio below is untouched, so the
+    // wrapped command's stdout still reaches the statusline.
     const child = spawn(originalCommand, {
       shell: true,
+      windowsHide: true,
       stdio: ['pipe', 'inherit', 'inherit'],
       env: originalSpawnEnv(),
     });

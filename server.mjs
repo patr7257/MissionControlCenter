@@ -1382,6 +1382,12 @@ const CONTENT_TYPES = {
   '.js': 'text/javascript; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.json': 'application/json; charset=utf-8',
+  // The theme tune (public/claudes-plan.mp3, see public/tune.js). Without an
+  // entry here the fallback below serves it as application/octet-stream and the
+  // browser refuses to decode it, so the easter egg silently does nothing.
+  // .ogg is listed too so swapping the clip's format cannot re-break it.
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
 };
 
 // Serve a file from PUBLIC_DIR if (and only if) the resolved path stays inside it.

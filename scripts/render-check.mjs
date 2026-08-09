@@ -224,6 +224,13 @@ server.stderr.on('data', (d) => process.stderr.write('[server] ' + d));
 
 const chrome = spawn(BROWSER, [
   '--headless=new', '--disable-gpu', '--no-sandbox', '--hide-scrollbars',
+  // The Claude mark plays a real <audio> clip (public/tune.js). Chrome's
+  // autoplay policy allows that only after USER activation, and a CDP-driven
+  // el.click() is an untrusted event, so play() would reject with
+  // NotAllowedError and the tune assertions would fail for a reason that has
+  // nothing to do with the app. This flag grants headless what a real click
+  // grants a real user, so what is asserted is the app's own behaviour.
+  '--autoplay-policy=no-user-gesture-required',
   `--remote-debugging-port=${CDP_PORT}`,
   `--user-data-dir=${path.join(TMP_HOME, 'cdp-profile')}`,
   '--window-size=1440,900', 'about:blank',
@@ -1648,19 +1655,45 @@ try {
   // the contract around it. The pressed state is painted from Tune's own
   // callback, never toggled optimistically on click, so a refused AudioContext
   // leaves the button reading "not playing" rather than lying.
+  // The state is painted from the <audio> element's own play/pause/ended events,
+  // which are ASYNC, so each step waits for the button to settle rather than
+  // reading it in the same tick. Reading synchronously would only ever prove
+  // that a click had happened, not that the audio agreed.
   const mark = await cdp.eval(`(function () {
     var el = document.getElementById('claudeMark');
-    if (!el) return { missing: true };
-    var before = { pressed: el.getAttribute('aria-pressed'), playing: el.classList.contains('playing') };
-    el.click();
-    var on = { pressed: el.getAttribute('aria-pressed'), playing: el.classList.contains('playing'), tune: Tune.isPlaying() };
-    el.click();
-    var off = { pressed: el.getAttribute('aria-pressed'), playing: el.classList.contains('playing'), tune: Tune.isPlaying() };
-    Tune.stop();
-    return {
-      tag: el.tagName, label: el.getAttribute('aria-label'), title: el.getAttribute('title'),
-      focusable: el.tabIndex >= 0, before: before, on: on, off: off
+    if (!el) return Promise.resolve({ missing: true });
+    var snap = function () {
+      return { pressed: el.getAttribute('aria-pressed'), playing: el.classList.contains('playing'), tune: Tune.isPlaying() };
     };
+    // Waits on the BUTTON, not on Tune.isPlaying(). audio.paused flips
+    // synchronously inside play(), so settling on the tune state resolves
+    // before the 'play' event has repainted the mark and proves nothing about
+    // the binding. What is being asserted is that the button converges on what
+    // the audio is really doing.
+    var settle = function (want) {
+      var target = want ? 'true' : 'false';
+      return new Promise(function (resolve) {
+        var tries = 0;
+        (function poll() {
+          var s = snap();
+          if (s.pressed === target || tries++ > 40) return resolve(s);
+          setTimeout(poll, 25);
+        })();
+      });
+    };
+    var before = snap();
+    el.click();
+    return settle(true).then(function (on) {
+      el.click();
+      return settle(false).then(function (off) {
+        Tune.stop();
+        return {
+          tag: el.tagName, label: el.getAttribute('aria-label'), title: el.getAttribute('title'),
+          focusable: el.tabIndex >= 0, src: (new Audio()).canPlayType('audio/mpeg') !== '',
+          before: before, on: on, off: off
+        };
+      });
+    });
   })()`);
   check('the header carries a focusable Claude mark button', mark.tag === 'BUTTON' && mark.focusable === true,
     JSON.stringify(mark));
@@ -1673,6 +1706,19 @@ try {
   check('clicking it again stops the tune and clears the pressed state',
     mark.off && mark.off.tune === false && mark.off.pressed === 'false' && mark.off.playing === false,
     JSON.stringify(mark.off));
+
+  // The clip is served by server.mjs's CONTENT_TYPES map, which had no audio
+  // entry at all until this shipped. The fallback is application/octet-stream,
+  // which the browser refuses to decode, so the mark would look wired up and do
+  // nothing. Assert the real response, not the map.
+  const clip = await cdp.eval(`fetch('/claudes-plan.mp3').then(function (r) {
+    return r.blob().then(function (b) {
+      return { status: r.status, type: r.headers.get('content-type'), bytes: b.size };
+    });
+  })`);
+  check('the tune clip is served as real audio, not application/octet-stream',
+    clip && clip.status === 200 && /^audio\/mpeg/.test(String(clip.type)) && clip.bytes > 10000,
+    JSON.stringify(clip));
 
   const errs = cdp.jsErrors();
   check('no JS or console errors on the board', errs.length === 0, errs.slice(0, 5).join(' | '));

@@ -217,7 +217,11 @@ error }` and the UI prints `error` verbatim.
 
 Five load-bearing details, four of them found only by really spawning it:
 - **NEVER pass `windowsHide` here. It hides the WINDOW, not just a console** (fixed 2026-08-04,
-  issue #33, and this note previously said the opposite). Node maps `windowsHide: true` to libuv's
+  issue #33, and this note previously said the opposite). This rule is about a GUI child and is the
+  OPPOSITE of the statusline wrapper's, which MUST pass it (see the Usage feed section): there the
+  child is a console process and the packaged parent has no console to lend it. Neither note is the
+  general case, so never apply one by analogy to the other; decide from the child's subsystem.
+  Node maps `windowsHide: true` to libuv's
   `UV_PROCESS_WINDOWS_HIDE`, which sets `STARTUPINFO.wShowWindow = SW_HIDE` together with
   `STARTF_USESHOWWINDOW`, and a GUI app honours that for its FIRST window. So a COLD VS Code start
   created its window invisibly: the process ran, the folder loaded, and the button looked completely
@@ -518,6 +522,18 @@ when `app.isPackaged`, exactly as it already does for `CMC_HOOK_COMMAND`. Three 
 optional:
 - **The wrapper ends `exit /b %ERRORLEVEL%`, NOT `exit /b 0`.** The hook shim is fire-and-forget; this
   one runs the user's real statusline and must report its exit code.
+- **The wrapper's child spawn MUST pass `windowsHide: true`, which is the OPPOSITE of the VS Code
+  rule** (issue #43, and 0.1.19 shipped without it). Read both notes before touching either. For
+  VS Code, hiding is banned because `Code.exe` is a GUI app whose own first window gets swallowed.
+  Here the child is console-subsystem (cmd.exe plus whatever the statusline runs) and the parent has
+  NO console to lend it: packaged, `statusline-feed.mjs` runs inside the Electron binary, which is
+  GUI-subsystem, so Windows creates a console for the child. On Windows 11 the default console host
+  is Windows Terminal, so that is a whole terminal WINDOW, and the statusline re-renders on roughly
+  every message and tool result. 0.1.19 flooded the developer's desktop until it crashed.
+  `windowsHide` maps to `CREATE_NO_WINDOW`, which suppresses the console only and leaves stdio
+  alone, so the wrapped command's stdout still reaches the statusline. Note the same trap waits for
+  any FUTURE spawn added to code that runs under the packaged binary: no console is inherited there,
+  so a console child always needs the flag.
 - **`ELECTRON_RUN_AS_NODE` is stripped from the child's env in `statusline-feed.mjs`.** The `.cmd`
   sets it so the Electron binary runs as node, and an inherited value would make an Electron-based
   statusline command run as a bare Node interpreter and print nothing: the same class of bug
@@ -711,26 +727,38 @@ The status bullet before the header title is an inline-SVG Claude starburst insi
 `<button id="claudeMark">`. Click it and the theme plays, click again and it stops. Same spot and
 same glow as the bullet it replaced, so the header layout is unchanged, and it carries no `title`
 attribute on purpose: an easter egg that announces itself on hover is not one.
-- **Synthesised, never streamed, and that is a constraint decision rather than a shortcut.** The
-  issue offered the Spotify dev app from `patr7257/music-timeline-quiz`; that needs a CDN script, an
-  OAuth round trip, a Premium session and live network, against this repo's hard rule of zero runtime
-  dependencies, no external calls, fully offline. So the issue's own fallback shipped: about 1KB of
-  oscillators, no asset, no request, no permission prompt. **The honest limit is that the Web Audio
-  API makes tones and cannot sing**, so this is the instrumental hook, not the vocal. The recording
-  itself would mean committing an audio file, which is a separate decision.
-- **The `AudioContext` is built on the first click** (browsers require a gesture before any sound),
-  wrapped in a try/catch, and `start()` returns false on failure, so a machine with no audio device
-  costs a dead click and nothing else.
-- **The button's pressed state is painted from `Tune.onChange`, never toggled on click**, so a
-  refused context cannot leave the mark claiming to play. `index.html` wires exactly that.
-- **The loop schedules ONE phrase ahead**, not the whole thing, so stopping is a cancelled timer plus
-  a short gain ramp rather than chasing hundreds of live oscillators. The ramp matters: yanking the
-  master gain to zero clicks audibly.
+- **It plays a bundled clip, `public/claudes-plan.mp3`, and the first version got this wrong.**
+  #39 shipped oscillators synthesising a melody written for the occasion, which kept the app offline
+  but played the WRONG THING: the Web Audio API makes tones and cannot sing, and the joke in that
+  song is the lyrics, so no amount of synthesis could ever deliver it (issue #44). Streaming from
+  Spotify, the other option in #39, needs a CDN script, an OAuth round trip, a Premium session and
+  live network, against this repo's hard rule of zero runtime dependencies, no external calls, fully
+  offline. A local file played by a plain `<audio>` element satisfies the constraint AND plays the
+  real song, so it wins on every axis. The clip ships in the MSI through the existing `public/**`
+  glob; no packaging change was needed.
+- **`server.mjs` `CONTENT_TYPES` needed an audio entry**, and this is the non-obvious half. With no
+  `.mp3` there the fallback serves the clip as `application/octet-stream`, the browser refuses to
+  decode it, and the mark looks correctly wired while doing nothing. `.ogg` is listed alongside so a
+  format swap cannot re-break it.
+- **The element is built on first use** with `preload='none'`, so a board nobody clicks the mark on
+  never fetches the ~900KB clip.
+- **The button's pressed state is painted from the AUDIO ELEMENT's own `play`/`pause`/`ended`
+  events via `Tune.onChange`, never toggled on click**, so a refused `play()` (autoplay policy,
+  missing file, no device) cannot leave the mark claiming to play. `isPlaying()` is derived from the
+  element rather than a flag we maintain, so our idea of the state and the browser's cannot diverge,
+  and `ended` clears the button when the song finishes.
+- **The API is unchanged from the oscillator version** (`toggle`/`stop`/`isPlaying`/`onChange`), so
+  `index.html`'s wiring did not move when the engine was swapped.
+- **`render-check.mjs` runs Chromium with `--autoplay-policy=no-user-gesture-required`**, because a
+  CDP `el.click()` is an untrusted event and Chrome would block playback for a reason that has
+  nothing to do with the app. Its assertions also settle on the BUTTON, not on `Tune.isPlaying()`:
+  `audio.paused` flips synchronously inside `play()`, so waiting on the tune state resolves before
+  the `play` event has repainted the mark and proves nothing about the binding.
 - `.claude-mark.playing` spins the mark and is listed in the existing `prefers-reduced-motion` block,
   like every other animation in the app.
 - `render-check.mjs` covers everything around the audio (focusable button, starts unpressed, state
-  follows `Tune` in both directions) because that is all that is provable headlessly; **whether it
-  actually sounds good is a human check.**
+  follows the audio in both directions, and the clip is served as real audio) because that is all that
+  is provable headlessly; **whether it is the right song and sounds good is a human check.**
 
 ## Verification tooling
 - `node scripts/smoke-server.mjs` - hermetic temp HOME, boots the server, checks the endpoints, hook
@@ -781,7 +809,7 @@ attribute on purpose: an easter egg that announces itself on hover is not one.
   `Close session` confirm (cancel POSTs nothing, confirm POSTs once), the end-of-session panel (only
   OK dismisses, each action flips to its opposite, two endings queue), the New session popup (one-row
   folder chain, and that neither the panel nor the first select changes width as the chain deepens)
-  and the Claude mark. Now 159 assertions.
+  and the Claude mark. Now 160 assertions.
 - **A spawn shape can be provably correct and still open nothing.** Both the `ELECTRON_RUN_AS_NODE`
   and the `detached` findings behind "Open in VS Code" passed every static and dry-run check and were
   only exposed by spawning for real and then ENUMERATING WINDOW TITLES (`EnumWindows` +
