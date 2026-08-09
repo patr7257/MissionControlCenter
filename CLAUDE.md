@@ -217,7 +217,11 @@ error }` and the UI prints `error` verbatim.
 
 Five load-bearing details, four of them found only by really spawning it:
 - **NEVER pass `windowsHide` here. It hides the WINDOW, not just a console** (fixed 2026-08-04,
-  issue #33, and this note previously said the opposite). Node maps `windowsHide: true` to libuv's
+  issue #33, and this note previously said the opposite). This rule is about a GUI child and is the
+  OPPOSITE of the statusline wrapper's, which MUST pass it (see the Usage feed section): there the
+  child is a console process and the packaged parent has no console to lend it. Neither note is the
+  general case, so never apply one by analogy to the other; decide from the child's subsystem.
+  Node maps `windowsHide: true` to libuv's
   `UV_PROCESS_WINDOWS_HIDE`, which sets `STARTUPINFO.wShowWindow = SW_HIDE` together with
   `STARTF_USESHOWWINDOW`, and a GUI app honours that for its FIRST window. So a COLD VS Code start
   created its window invisibly: the process ran, the folder loaded, and the button looked completely
@@ -518,6 +522,18 @@ when `app.isPackaged`, exactly as it already does for `CMC_HOOK_COMMAND`. Three 
 optional:
 - **The wrapper ends `exit /b %ERRORLEVEL%`, NOT `exit /b 0`.** The hook shim is fire-and-forget; this
   one runs the user's real statusline and must report its exit code.
+- **The wrapper's child spawn MUST pass `windowsHide: true`, which is the OPPOSITE of the VS Code
+  rule** (issue #43, and 0.1.19 shipped without it). Read both notes before touching either. For
+  VS Code, hiding is banned because `Code.exe` is a GUI app whose own first window gets swallowed.
+  Here the child is console-subsystem (cmd.exe plus whatever the statusline runs) and the parent has
+  NO console to lend it: packaged, `statusline-feed.mjs` runs inside the Electron binary, which is
+  GUI-subsystem, so Windows creates a console for the child. On Windows 11 the default console host
+  is Windows Terminal, so that is a whole terminal WINDOW, and the statusline re-renders on roughly
+  every message and tool result. 0.1.19 flooded the developer's desktop until it crashed.
+  `windowsHide` maps to `CREATE_NO_WINDOW`, which suppresses the console only and leaves stdio
+  alone, so the wrapped command's stdout still reaches the statusline. Note the same trap waits for
+  any FUTURE spawn added to code that runs under the packaged binary: no console is inherited there,
+  so a console child always needs the flag.
 - **`ELECTRON_RUN_AS_NODE` is stripped from the child's env in `statusline-feed.mjs`.** The `.cmd`
   sets it so the Electron binary runs as node, and an inherited value would make an Electron-based
   statusline command run as a bare Node interpreter and print nothing: the same class of bug

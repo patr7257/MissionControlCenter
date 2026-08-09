@@ -93,6 +93,23 @@ check('the stdin payload is piped through to the original command unchanged',
 check('a quoted command path containing spaces survives the shell',
   !/(unparsed)/.test(String(r.stderr || '')) && r.status === 0, r.status + ' ' + r.stderr);
 
+// ---- windowsHide (issue #43). Honestly labelled: this one is STATIC, a read of
+// the module source, unlike everything else in this file. Proving the real thing
+// means spawning and then ENUMERATING WINDOWS to see whether a console appeared,
+// and that is exactly what must not run: without the flag, 0.1.19 opened a fresh
+// Windows Terminal window per statusline render and flooded the desktop until it
+// crashed, so a test that reproduced it would be the bug.
+//
+// The behavioural half is already above and is the part that matters most: those
+// assertions run WITH the flag set, so "stdout is forwarded" and "our exit code
+// is the child's" now double as proof that windowsHide suppresses the console
+// WITHOUT touching stdio.
+const feedSource = fs.readFileSync(SCRIPT, 'utf8');
+const spawnOpts = /spawn\(originalCommand,\s*\{([\s\S]*?)\}\)/.exec(feedSource);
+check('the wrapper spawn still hides the console window (static read of the source)',
+  !!spawnOpts && /windowsHide:\s*true/.test(spawnOpts[1]) && /shell:\s*true/.test(spawnOpts[1]),
+  spawnOpts ? spawnOpts[1].replace(/\s+/g, ' ').trim() : 'spawn(originalCommand, {...}) not found');
+
 // ---- The exit code belongs to the child, never to us. A statusline command
 // that fails must look failed to Claude Code.
 r = run({ ORIG_EXIT: '7' });
