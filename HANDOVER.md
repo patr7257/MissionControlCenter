@@ -13,9 +13,34 @@
 - Latest release: **`fleet-v0.1.20`**, MSI attached (112 MB). The tag points at the merge commit
   itself (`fleet-v0.1.20` -> `371030f`, verified), so the work really is in that MSI.
   `https://github.com/patr7257/MissionControlCenter/releases/download/fleet-v0.1.20/Mission.Control.Center.0.1.20.msi`
-- **Whether 0.1.20 was installed is UNCONFIRMED at session end.** This matters more than usual: see
-  the next section.
+- **0.1.20 is INSTALLED and everything this session shipped is confirmed working from it**
+  (2026-08-09, screenshot reviewed): the in-app update check reports "You are on the latest version
+  (0.1.20)", there is no terminal-window flashing, the tune plays, and the usage feed populates. That
+  last one closes an item that had been the top carried-over gap for four sessions. Details in
+  "Confirmed live" below.
 - Board: both cards Done, no open issues, no open PRs, `main` is the only branch local and remote.
+
+## Confirmed live from the installed 0.1.20 (2026-08-09)
+Everything below was seen working on Patrick's machine, not inferred:
+- **No terminal windows.** The #43 regression is genuinely fixed in a packaged install, and the
+  statusline feed still works at the same time, which is the pair that matters: hiding the console
+  must not cost the feed.
+- **The usage feed populates in a packaged install.** The 5 hour bar (15%), the 7 day bar, and the
+  per-card context rings (8 / 17 / 38 CTX) all render with real numbers. **This is the first time
+  this has ever been seen working outside the repo copy**, and it was the top carried-over item for
+  four sessions.
+- **The tune plays and it is the right song.**
+- The runtime rings work with real values, including the red severity band (a 487 MIN session, past
+  the 255 red threshold).
+- The in-app update check answers correctly ("You are on the latest version (0.1.20)") via the `gh`
+  CLI, so the self-update path is healthy on this install.
+
+One thing to look at, low confidence because it comes from a single cropped screenshot rather than a
+measurement: **the header's 7 day bar showed no percentage or reset text beside it**, where the
+design (and `render-check.mjs`) expects something like `68% resets Thu 12:35`. It may simply have
+been clipped by the window edge in that capture. Reproduce at a known window width before treating it
+as a bug, and note CLAUDE.md's standing rule that a layout claim from a resized or cropped view is
+not evidence.
 
 ## READ THIS FIRST: this session shipped a bad regression and then fixed it
 1. **0.1.19 flooded the desktop with terminal windows until it crashed.** #41 packaged the statusline
@@ -85,20 +110,20 @@ Not started (carried over, unchanged by these sessions):
   raises the window rather than only flashing the taskbar icon. Both best effort by design.
 
 ## Prioritized next steps
-1. **Install 0.1.20 and confirm the terminal windows are gone.** This is the only real proof the
-   regression is fixed; everything else about it is static or mechanism. Until it is installed, do
-   NOT open the app: launching an installed 0.1.19 re-registers the broken wrapper and the flooding
-   restarts.
-2. **Confirm the quota bars and the context rings finally populate in a packaged install.** That was
-   the whole point of #41 and has still never been seen working outside the repo copy.
-3. **Listen to the easter egg and confirm it is the right song.** Click the starburst in the header.
-   The clip was supplied by Patrick; nothing automated can judge it.
-4. Walk the New session folder chain to its deepest level and confirm nothing on screen moves. The
-   geometry is asserted, but the feel of it is not.
-5. Decide whether `scripts/render-check.mjs` should run in CI. It is now 160 assertions and the only
+The three verification items that used to head this list are all done, see "Confirmed live" above.
+1. **Check the header's 7 day bar at a known window width** and confirm its percentage and reset text
+   are actually rendered rather than clipped. See the caveat above; this is an observation from one
+   cropped screenshot, not a measurement, so establish whether there is a bug before fixing one.
+2. Walk the New session folder chain to its deepest level and confirm nothing on screen moves. The
+   geometry is asserted, but the feel of it is not, and the reserved empty tracks are a deliberate
+   trade that Patrick has not passed judgement on yet.
+3. Decide whether `scripts/render-check.mjs` should run in CI. It is now 160 assertions and the only
    automated cover for this much UI, and it skips with exit 0 without a browser, so it needs a
-   browser step on the runner. Open since the last two sessions.
-6. Teach `public/demo.js` the newer UI so `?demo=1` still represents the app.
+   browser step on the runner. Open since three sessions.
+4. Teach `public/demo.js` the newer UI so `?demo=1` still represents the app. It has now drifted
+   through five features and is the largest piece of visible rot in the repo.
+5. Pick up the smaller carried-over items: the patrickrobelweb embed of the `?demo=1` showcase, the
+   Humaaans CC-BY credit line, and the demo confetti beat.
 
 ## Verbatim resume commands (PowerShell first)
 Start the app from the repo (installs hooks AND the statusline wrap, serves http://localhost:4317).
@@ -215,10 +240,11 @@ cd "C:\Users\pr\repos\1-Personal\MissionControlCenter"; git tag fleet-v0.2.0; gi
   stop being what `bringToForeground()` matches on? PatrickRobelWeb's `HANDOVER.md` is stale.
 
 ## Environment state
-- **No server is running.** `~/.claude/agent-fleet-monitor/server.lock` is absent and nothing listens
-  on 4317. `settings.statusLine` is back on Patrick's own
-  `python "C:\Users\pr\.claude\statusline-command.py"`, restored when the app was quit, which is why
-  the desktop is quiet. **Opening an installed 0.1.19 re-arms the window bug; install 0.1.20 first.**
+- **0.1.20 is installed.** At the moment this handover was written no server was running:
+  `~/.claude/agent-fleet-monitor/server.lock` is absent, nothing listens on 4317, and
+  `settings.statusLine` is back on Patrick's own `python "C:\Users\pr\.claude\statusline-command.py"`,
+  restored when the app was last quit. That is the normal quiet state; opening the app re-installs
+  the wrapper and the hooks, and on 0.1.20 that is now safe.
 - Every test server this session ran under `CMC_DRY_RUN` with a hermetic temp HOME and is stopped.
   Nothing was ever parked on 4318.
 - **Window probes were run against the live desktop and are deleted.** Two diagnostic scripts
