@@ -21,6 +21,14 @@ const HOME = os.homedir();
 const DATA_DIR = path.join(HOME, '.claude', 'agent-fleet-monitor');
 const LOCK_FILE = path.join(DATA_DIR, 'server.lock');
 const LOG_FILE = path.join(DATA_DIR, 'log.jsonl');
+// Rotation cap for that log. It is append-only, written on EVERY hook event and
+// read by nothing, so unbounded it just grows: 129 MB was found on the
+// developer's machine on 2026-09-01. One generation is kept (log.jsonl.1), which
+// is plenty for the only thing the file is for, reading back what a hook sent.
+// Overridable so scripts/smoke-server.mjs can prove a rotation without writing
+// tens of megabytes.
+const LOG_MAX_BYTES = Number(process.env.CMC_LOG_MAX_BYTES) || 32 * 1024 * 1024;
+const LOG_PREV_FILE = LOG_FILE + '.1';
 // Sessions model is persisted here so a server restart (dev reload, machine
 // reboot) does not lose the board. Rehydrated on start and merged with the
 // backfill scan; writes are debounced and skipped under CMC_DRY_RUN.
@@ -641,6 +649,39 @@ function unblockMainSessionOnToolActivity(session) {
   return false;
 }
 
+// The size is tracked in memory rather than stat'd per event: a hook event
+// arrives on every tool call, and this append already sits on the request path.
+// Seeded once from the file on the first write, so a restart picks up whatever
+// the previous run left.
+let logBytes = null;
+
+function appendEventLog(entry) {
+  try {
+    const line = JSON.stringify(entry) + '\n';
+    // byteLength, not .length: a payload with non-ASCII text would otherwise
+    // undercount and the file would drift past the cap.
+    const size = Buffer.byteLength(line);
+    if (logBytes === null) {
+      try {
+        logBytes = fs.statSync(LOG_FILE).size;
+      } catch {
+        logBytes = 0;
+      }
+    }
+    if (logBytes > 0 && logBytes + size > LOG_MAX_BYTES) {
+      // rename replaces an existing .1 on Windows and POSIX alike, so exactly
+      // one previous generation is kept.
+      fs.renameSync(LOG_FILE, LOG_PREV_FILE);
+      logBytes = 0;
+    }
+    fs.appendFileSync(LOG_FILE, line);
+    logBytes += size;
+  } catch {
+    // logging is best effort; a failed write must never drop the event itself
+    logBytes = null;
+  }
+}
+
 function handleEvent(payload) {
   const ev = payload && payload.hook_event_name;
   const agentId = payload && payload.agent_id;
@@ -650,11 +691,7 @@ function handleEvent(payload) {
   const sessionId = payload && payload.session_id;
   const cwd = payload && payload.cwd;
 
-  try {
-    fs.appendFileSync(LOG_FILE, JSON.stringify({ at: nowMs(), payload }) + '\n');
-  } catch {
-    // logging is best effort
-  }
+  appendEventLog({ at: nowMs(), payload });
 
   // Session-lifecycle events carry session_id but no agent_id. Handle them
   // before the agent_id guards below, which are for subagent events only.

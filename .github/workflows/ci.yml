@@ -56,6 +56,12 @@ jobs:
       - name: Resume-flag CLI check
         run: node scripts/check-flag-resume.mjs
 
+      # The desktop shell's startup decision: a lock file naming a live pid is not
+      # proof anything serves (Windows recycles pids), so the backend must still be
+      # started and waited for. Fake clock and injected dependencies, no Electron.
+      - name: Server startup check
+        run: node scripts/check-server-ready.mjs
+
       # The statusline wrapper, spawned for real: it must forward the wrapped
       # command's stdout and exit code, pipe stdin through, and never leak
       # ELECTRON_RUN_AS_NODE (set by the packaged app's .cmd shim) into it.

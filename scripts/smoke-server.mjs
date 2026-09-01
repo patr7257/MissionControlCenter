@@ -41,6 +41,9 @@ const env = {
   HOME: TMP_HOME,
   CMC_DRY_RUN: '1',
   CMC_REGISTRY_POLL_MS: String(REGISTRY_POLL_MS),
+  // A tiny cap so the hook events this suite already posts prove the rotation
+  // without writing tens of megabytes. The real default is 32 MB.
+  CMC_LOG_MAX_BYTES: '2000',
   // VS Code is NOT installed on the CI runner, and this script must assert the
   // command shape rather than discovery. process.execPath is a real existing
   // executable everywhere, and nothing is ever spawned under CMC_DRY_RUN, so the
@@ -1180,6 +1183,33 @@ try {
     terminal.isEditorOpen(path.join(TMP_HOME, 'never-opened-at-all')) === false);
   if (prevDry === undefined) delete process.env.CMC_DRY_RUN;
   else process.env.CMC_DRY_RUN = prevDry;
+
+  // ---- The hook event log rotates instead of growing forever. It is appended on
+  // EVERY hook event and read by nothing, so unbounded it just accumulates: 129 MB
+  // was found on the developer's machine on 2026-09-01. The cap is 2000 bytes here
+  // (CMC_LOG_MAX_BYTES above), and the suite has posted far more than that by now.
+  const LOG_FILE = path.join(TMP_HOME, '.claude', 'agent-fleet-monitor', 'log.jsonl');
+  // Padded events, so the rotation is forced by this assertion rather than by
+  // however much the rest of the suite happened to log.
+  for (let i = 0; i < 3; i++) {
+    await fetch(`${BASE}/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hook_event_name: 'PreToolUse',
+        session_id: 'smoke-log-rotate',
+        cwd: 'C:/tmp/smoke',
+        tool_name: 'Bash',
+        padding: 'x'.repeat(1200),
+      }),
+    });
+  }
+  await sleep(300);
+  const logSize = fs.existsSync(LOG_FILE) ? fs.statSync(LOG_FILE).size : -1;
+  check('the hook event log is written at all', logSize > 0);
+  check('the hook event log rotated rather than growing past its cap', logSize <= 2000);
+  check('rotation keeps exactly one previous generation (log.jsonl.1)', fs.existsSync(`${LOG_FILE}.1`));
+  check('no second generation is kept, so the folder cannot fill up', !fs.existsSync(`${LOG_FILE}.2`));
 
   check('isInsideReposRoot accepts a folder in the repos root and rejects a sibling',
     terminal.isInsideReposRoot(path.join(os.homedir(), 'repos', 'anything')) === true &&
