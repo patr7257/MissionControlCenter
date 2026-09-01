@@ -12,10 +12,12 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { findNewerRelease, downloadReleaseMsi, RELEASES_URL } from './update-check.mjs';
 import { installerSpawnArgs } from './installer-cmd.mjs';
+import { ensureServerReady, STARTUP_TIMEOUT_MS, PROBE_TIMEOUT_MS } from './server-ready.mjs';
 
 const DEFAULT_PORT = 4317;
 const DATA_DIR = path.join(os.homedir(), '.claude', 'agent-fleet-monitor');
 const LOCK_FILE = path.join(DATA_DIR, 'server.lock');
+const DEBUG_LOG = path.join(DATA_DIR, 'desktop-debug.log');
 
 // The dashboard URL follows the lock file (a running server may sit on a
 // non-default port), falling back to the default while nothing is running yet.
@@ -30,6 +32,19 @@ const BACKEND = app.isPackaged
 let mainWin = null;
 // Set on before-quit so the SSE notification loop stops retrying during shutdown.
 let quitting = false;
+
+// One append-only line per notable shell event. The startup failure this exists
+// for is intermittent, so without a record on disk the next occurrence is just
+// as undiagnosable as the last one. Best effort, never throws: a shell that
+// cannot log must still start.
+function logDesktop(message) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFileSync(DEBUG_LOG, `${new Date().toISOString()} ${message}\n`);
+  } catch {
+    // logging is best effort
+  }
+}
 
 function pidAlive(pid) {
   try {
@@ -80,32 +95,49 @@ async function ensureHooks() {
   }
 }
 
-function ensureServer() {
-  if (runningLock()) return;
+// The raw lock, WITHOUT the pid-liveness test runningLock() applies. For the
+// startup decision the lock is only a hint about which port to try: whether
+// anything serves is settled by an HTTP answer, never by a pid. See
+// server-ready.mjs for why (recycled pids used to stop the backend starting at
+// all, and the app then failed on an 8 second dead end).
+function readLockFile() {
+  try {
+    return JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function startBackend() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   runAsNode(path.join(BACKEND, 'server.mjs'), ['--port', String(DEFAULT_PORT)], {
     detached: true,
   }).unref();
 }
 
-async function waitForServer(timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const lock = runningLock();
-    const port = (lock && lock.port) || DEFAULT_PORT;
-    const url = `http://127.0.0.1:${port}`;
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(1000) });
-      if (res.ok) {
-        dashUrl = url;
-        return true;
-      }
-    } catch {
-      // not up yet
-    }
-    await new Promise((r) => setTimeout(r, 150));
+async function probeServer(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}`, {
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    return res.ok;
+  } catch {
+    return false;
   }
-  return false;
+}
+
+// Probe, spawn if needed, wait until it answers. Sets dashUrl on success, so the
+// window and the SSE notification subscriber follow the port that really served.
+async function ensureDashboard() {
+  const result = await ensureServerReady({
+    readLock: readLockFile,
+    probe: probeServer,
+    spawnServer: startBackend,
+    defaultPort: DEFAULT_PORT,
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  });
+  if (result.ok) dashUrl = `http://127.0.0.1:${result.port}`;
+  return result;
 }
 
 // Full teardown: stop the detached server (via its lock file) and remove the
@@ -351,7 +383,14 @@ function maybeNotify(port, s, seedOnly) {
 
 // Consume the server's SSE stream and raise a native notification whenever a
 // session transitions into a blocked status. Reconnects on drop; stops on quit.
+// Guarded because there are now two callers (startup and the retry path), and
+// the loop below reconnects forever on its own: a second one would raise every
+// notification twice for the rest of the session.
+let subscribed = false;
+
 async function subscribeNotifications(port) {
+  if (subscribed) return;
+  subscribed = true;
   const url = `http://127.0.0.1:${port}/stream`;
   while (!quitting) {
     try {
@@ -403,6 +442,12 @@ function buildMenu() {
         },
         { type: 'separator' },
         {
+          label: 'Retry starting server',
+          click: () => {
+            retryServer();
+          },
+        },
+        {
           label: 'Stop server and remove hooks',
           click: () => stopServerAndRemoveHooks(),
         },
@@ -416,13 +461,48 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// The retry button is the point of this page: the failure is intermittent (a
+// cold 232 MB binary, a port held by something else), so the fix is usually one
+// more attempt rather than a reinstall. It reaches the main process over the
+// preload bridge, and Fleet > "Retry starting server" does the same thing in
+// case a page-level script ever cannot.
 function errorPage() {
+  const seconds = Math.round(STARTUP_TIMEOUT_MS / 1000);
   const html = `<body style="background:#111827;color:#f9fafb;font:15px system-ui;padding:40px">
     <h2>Server did not start</h2>
-    <p>The mission control server did not answer at ${dashUrl} within 8 seconds.</p>
-    <p>Check ~/.claude/agent-fleet-monitor/log.jsonl, or run the backend by hand:
-    <code>node start.mjs</code> in the MissionControlCenter folder.</p></body>`;
+    <p>The mission control server did not answer at ${dashUrl} within ${seconds} seconds.</p>
+    <p><button id="retry" style="font:15px system-ui;padding:8px 16px;border-radius:6px;border:0;background:#2563eb;color:#fff;cursor:pointer">Retry</button>
+    <span id="msg" style="margin-left:12px;color:#9ca3af"></span></p>
+    <p>Also in the menu: Fleet &gt; Retry starting server. The shell logs every
+    attempt to ~/.claude/agent-fleet-monitor/desktop-debug.log; hook events go to
+    log.jsonl in the same folder. To run the backend by hand:
+    <code>node start.mjs</code> in the MissionControlCenter folder.</p>
+    <script>
+      var b = document.getElementById('retry'), m = document.getElementById('msg');
+      b.addEventListener('click', function () {
+        if (!window.cmcRetry) { m.textContent = 'Use Fleet > Retry starting server.'; return; }
+        b.disabled = true;
+        m.textContent = 'Starting...';
+        window.cmcRetry.start().then(function (r) {
+          if (r && r.ok) return; // the window navigates to the dashboard
+          b.disabled = false;
+          m.textContent = 'Still no answer.';
+        });
+      });
+    </script></body>`;
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+}
+
+// Shared by the error page's button and the Fleet menu item. Loads the dashboard
+// on success and leaves the error page up (re-armed) on failure.
+async function retryServer() {
+  const result = await ensureDashboard();
+  logDesktop(`retry -> ok=${result.ok} port=${result.port} reason=${result.reason}`);
+  if (!result.ok || mainWin === null) return { ok: false };
+  await mainWin.loadURL(dashUrl);
+  notifyUpdateBanner(mainWin);
+  subscribeNotifications(Number(new URL(dashUrl).port) || DEFAULT_PORT);
+  return { ok: true };
 }
 
 async function startApp() {
@@ -436,8 +516,10 @@ async function startApp() {
     return { ok: await downloadAndInstall(tag) };
   });
 
+  // The renderer's Retry button (error page) invokes this.
+  ipcMain.handle('cmc:retry-server', () => retryServer());
+
   await ensureHooks();
-  ensureServer();
 
   mainWin = new BrowserWindow({
     width: 1280,
@@ -471,14 +553,20 @@ async function startApp() {
     mainWin.webContents.send('cmc:nav', command === 'browser-backward' ? 'back' : 'forward');
   });
 
-  const up = await waitForServer(8000);
+  const result = await ensureDashboard();
   if (mainWin === null) return; // window closed while waiting
-  if (up) {
+  if (result.ok) {
+    if (result.spawned) logDesktop(`startup -> started backend on port ${result.port}`);
     await mainWin.loadURL(dashUrl);
     notifyUpdateBanner(mainWin);
     const port = Number(new URL(dashUrl).port) || DEFAULT_PORT;
     subscribeNotifications(port);
   } else {
+    const lock = readLockFile();
+    logDesktop(
+      `startup FAILED after ${STARTUP_TIMEOUT_MS}ms: no answer on port ${result.port}` +
+        ` (lock=${lock ? JSON.stringify(lock) : 'absent'})`
+    );
     await mainWin.loadURL(errorPage());
   }
 }

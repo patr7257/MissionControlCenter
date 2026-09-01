@@ -30,6 +30,13 @@ See `docs/plans/` and `docs/specs/` for the design and roadmap.
   downgrades any in-flight status (`working`/`awaiting`/`needs-permission`) to `recent` + not-live
   since a persisted session was not seen live this run; hooks re-upgrade it on the next event.
   Rehydrate runs before the backfill scan (which skips ids already present) and before hooks fire.
+- **The hook event log rotates** (`appendEventLog()`, 2026-09-01). `~/.claude/agent-fleet-monitor/
+  log.jsonl` gets one line per hook event, i.e. per tool call, and is read by NOTHING, so unbounded it
+  only grows: **129 MB** was found on the developer's machine. Past `LOG_MAX_BYTES` (32 MB,
+  overridable via `CMC_LOG_MAX_BYTES` so `smoke-server.mjs` can force a rotation cheaply) the file is
+  renamed to `log.jsonl.1`, replacing any previous one, so exactly one generation is kept. The size is
+  tracked in memory (seeded by one `statSync` on the first write) rather than stat'd per event,
+  because this append already sits on the request path.
 - Hooks: `install-hooks.mjs` merges a set of hooks into `~/.claude/settings.json` while active;
   `uninstall-hooks.mjs` removes exactly those; `send-event.mjs` is the per-hook shim that POSTs
   to the server and no-ops instantly when the server is down. `start.mjs` / `stop.mjs`
@@ -788,6 +795,13 @@ attribute on purpose: an easter egg that announces itself on hover is not one.
   three record outcomes (a real command, `{had:false}`, missing/unreadable) stay distinct. Runs in
   CI. It cannot IMPORT the module: that would run its stdin wiring and hang, which is also why the
   env helper there is not exported.
+- `node scripts/check-server-ready.mjs` - the desktop shell's startup decision
+  (`desktop/server-ready.mjs`), with every dependency injected and a fake clock, so a 30s budget costs
+  milliseconds. Runs in CI, needs no Electron. It exists because the bug it covers read as correct
+  code: trusting a live pid in `server.lock` as proof the backend was serving. Re-introducing that
+  line fails three of its assertions (break-tested 2026-09-01). Its last section is a labelled STATIC
+  read of the retry wiring (the `cmc:retry-server` channel name across the page, the preload bridge
+  and the handler), because proving the button itself needs Electron.
 - `node scripts/check-installer-launch.mjs` - spawns the updater's real install command with a
   stand-in for msiexec and asserts the MSI path arrives unmangled. Windows only (it is Windows
   quoting under test) and SKIPS with exit 0 elsewhere, but CI runs on `windows-latest`, so it really
@@ -864,6 +878,30 @@ The zero-runtime-dependency rule still applies to the server and `public/` UI; `
 one place where npm devDependencies (electron, electron-builder) are allowed. Key facts:
 - `desktop/main.mjs` spawns `../server.mjs` detached with `ELECTRON_RUN_AS_NODE=1` (lock file,
   `stop.mjs`, and the shim keep working unchanged) and loads `http://127.0.0.1:4317`.
+- **Startup readiness lives in `desktop/server-ready.mjs`, and `server.lock` is only a HINT about
+  which port to try** (2026-09-01). The old `ensureServer()` skipped the spawn whenever the lock
+  named a pid that was merely ALIVE, so a lock left by a non-graceful exit whose pid Windows had
+  recycled meant the backend never started at all; the shell then polled for **8 seconds** and landed
+  on a dead-end error page with no retry and no log line. The only thing that now counts as "running"
+  is an HTTP answer. Three parts, and all three matter:
+  - **The budget is 30s** (`STARTUP_TIMEOUT_MS`). Warm, the packaged backend answers in ~0.44s
+    (measured 2026-09-01: 304ms to "listening", 441ms to the first HTTP 200, with the startup
+    filesystem work over 233 transcripts costing ~50ms), so 8s was never about a slow backend: it was
+    a first launch after a reboot paging a 232 MB Electron binary in past Defender's scan.
+  - **The spawn happens exactly once per attempt.** A respawn loop would pile up backends against a
+    port held by another program. A second attempt is the user's: the error page has a **Retry**
+    button (over `preload.cjs`'s `cmcRetry` bridge -> `ipcMain` `cmc:retry-server`) and Fleet >
+    "Retry starting server" does the same thing from the menu, which is also the fallback the page
+    names if the bridge is ever missing.
+  - **Every attempt is logged** to `~/.claude/agent-fleet-monitor/desktop-debug.log` (`logDesktop()`),
+    including the lock contents on a failure. The failure is intermittent, and before this nothing on
+    disk recorded it, so each occurrence was as undiagnosable as the last.
+  - `subscribeNotifications()` is now guarded by a `subscribed` flag: it reconnects forever on its
+    own, and the retry path is a second caller, so without the guard every notification would arrive
+    twice for the rest of the session.
+  - Tested by `scripts/check-server-ready.mjs` with injected dependencies and a fake clock; the
+    Electron-only half (does a button on a `data:` URL reach the main process) is a labelled STATIC
+    channel-name check, not a claim that it was run.
 - Shutdown: closing the window (X), the Fleet menu "Quit", and "Stop server and remove hooks" all
   run the same guarded teardown (`stopServerAndRemoveHooks` -> `runTeardown()` -> `stop.mjs`: stop
   the detached server via the lock file + remove hooks, then `app.quit()`). It runs once per session
@@ -955,9 +993,10 @@ rather than skipping. It `node --check`s every `*.mjs` in the repo, boots the se
 `scripts/smoke-server.mjs` (hermetic temp HOME, checks `/`, `/repos`, `/stream`, one hook event),
 then runs `scripts/check-desktop-package.mjs` (packaging omissions),
 `scripts/check-installer-launch.mjs` (the updater's install command),
-`scripts/check-flag-resume.mjs` (the `/resume-later` engine) and
+`scripts/check-flag-resume.mjs` (the `/resume-later` engine),
+`scripts/check-server-ready.mjs` (the desktop shell's startup decision) and
 `scripts/check-statusline-feed.mjs` (the statusline wrapper's process contract). Zero-dependency, so
-there is nothing to install, and all six run locally too. `scripts/render-check.mjs` is deliberately
+there is nothing to install, and all seven run locally too. `scripts/render-check.mjs` is deliberately
 NOT in CI: it needs a real browser and skips with exit 0 when none is present.
 
 ## Docs
